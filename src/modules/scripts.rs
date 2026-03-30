@@ -1,14 +1,12 @@
-use crate::modules::mode::WindowMode;
 use crate::modules::mode;
+use crate::modules::mode::WindowMode;
 use crate::modules::settings::*;
 use std::sync::atomic::Ordering;
 
 const TOGGLE_FANCY_ANIMATION_SCRIPT: &str =
     include_str!("../../scripts/toggle-expensive-effects.js");
-const TOGGLE_BLUR_EFFECTS_SCRIPT: &str =
-    include_str!("../../scripts/toggle-blur-effects.js");
-const WINDOW_MODE_CHROME_SCRIPT: &str =
-    include_str!("../../scripts/window-mode-chrome.js");
+const TOGGLE_BLUR_EFFECTS_SCRIPT: &str = include_str!("../../scripts/toggle-blur-effects.js");
+const WINDOW_MODE_CHROME_SCRIPT: &str = include_str!("../../scripts/window-mode-chrome.js");
 
 pub struct Scripts {
     pub transparent_bg_script: &'static str,

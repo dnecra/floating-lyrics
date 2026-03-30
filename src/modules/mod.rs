@@ -6,4 +6,5 @@ pub mod mode;
 pub mod network;
 pub mod scripts;
 pub mod settings;
+pub mod update;
 pub mod window;

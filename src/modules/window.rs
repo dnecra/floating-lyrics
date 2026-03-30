@@ -140,12 +140,7 @@ pub fn update_layout_container_bounds(
     viewport_height: f64,
     exists: bool,
 ) {
-    if !exists
-        || !x.is_finite()
-        || !y.is_finite()
-        || !width.is_finite()
-        || !height.is_finite()
-    {
+    if !exists || !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
         LAYOUT_EXISTS.store(false, Ordering::SeqCst);
         set_hover_hide_auto_disabled(false);
         return;
@@ -549,7 +544,9 @@ fn is_cursor_inside_layout_container(window: &tauri::WebviewWindow) -> bool {
 
     #[cfg(target_os = "windows")]
     {
-        let Some((cx, cy)) = get_cursor_pos_screen() else { return false };
+        let Some((cx, cy)) = get_cursor_pos_screen() else {
+            return false;
+        };
         let pos = window.inner_position().or_else(|_| window.outer_position());
         let Ok(pos) = pos else { return false };
         let scale = window.scale_factor().unwrap_or(1.0);
@@ -599,9 +596,16 @@ fn get_monitor_taskbar_height(
     let cx = monitor_x.saturating_add((size.width / 2) as i32);
     let cy = monitor_y.saturating_add((size.height / 2) as i32);
     let mon = unsafe { MonitorFromPoint(POINT { x: cx, y: cy }, MONITOR_DEFAULTTONEAREST) };
-    if mon.0.is_null() { return 0; }
-    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-    if !unsafe { GetMonitorInfoW(mon, &mut info as *mut MONITORINFO) }.as_bool() { return 0; }
+    if mon.0.is_null() {
+        return 0;
+    }
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(mon, &mut info as *mut MONITORINFO) }.as_bool() {
+        return 0;
+    }
     let bottom = (info.rcMonitor.bottom - info.rcWork.bottom).max(0) as u32;
     let top = (info.rcWork.top - info.rcMonitor.top).max(0) as u32;
     bottom.max(top)
@@ -618,7 +622,15 @@ fn set_hwnd_topmost(window: &tauri::WebviewWindow) {
     if let Ok(hwnd) = window.hwnd() {
         unsafe {
             let hwnd = HWND(hwnd.0 as *mut core::ffi::c_void);
-            let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
         }
     }
 }
@@ -627,8 +639,8 @@ fn set_hwnd_topmost(window: &tauri::WebviewWindow) {
 fn set_window_alpha(window: &tauri::WebviewWindow, alpha: u8) {
     use windows::Win32::Foundation::{COLORREF, HWND};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, SetLayeredWindowAttributes, SetWindowLongW,
-        GWL_EXSTYLE, LWA_ALPHA, WS_EX_LAYERED,
+        GetWindowLongW, SetLayeredWindowAttributes, SetWindowLongW, GWL_EXSTYLE, LWA_ALPHA,
+        WS_EX_LAYERED,
     };
     if let Ok(hwnd) = window.hwnd() {
         unsafe {
@@ -658,19 +670,22 @@ pub fn apply_windows_visual_tweaks(window: &tauri::WebviewWindow) {
             let hwnd = HWND(hwnd.0 as *mut core::ffi::c_void);
             let corner = DWM_WINDOW_CORNER_PREFERENCE(DWMWCP_DONOTROUND.0);
             let _ = DwmSetWindowAttribute(
-                hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
                 &corner as *const _ as *const core::ffi::c_void,
                 std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
             );
             let no_border = COLORREF(0xFF_FF_FF_FE);
             let _ = DwmSetWindowAttribute(
-                hwnd, DWMWA_BORDER_COLOR,
+                hwnd,
+                DWMWA_BORDER_COLOR,
                 &no_border as *const _ as *const core::ffi::c_void,
                 std::mem::size_of::<COLORREF>() as u32,
             );
             let disable = BOOL(1);
             let _ = DwmSetWindowAttribute(
-                hwnd, DWMWA_TRANSITIONS_FORCEDISABLED,
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
                 &disable as *const _ as *const core::ffi::c_void,
                 std::mem::size_of::<BOOL>() as u32,
             );

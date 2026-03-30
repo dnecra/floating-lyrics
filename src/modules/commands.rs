@@ -1,6 +1,6 @@
-use std::sync::atomic::Ordering;
 use crate::modules::mode;
 use crate::modules::settings::*;
+use std::sync::atomic::Ordering;
 
 #[tauri::command]
 pub fn set_click_through(app: tauri::AppHandle, enabled: bool) {
@@ -59,7 +59,9 @@ pub fn set_blur_enabled(app: tauri::AppHandle, enabled: bool) {
 
 #[tauri::command]
 pub fn toggle_window_mode_fullscreen(app: tauri::AppHandle) {
-    let Some(window) = mode::active_window(&app) else { return };
+    let Some(window) = mode::active_window(&app) else {
+        return;
+    };
     if mode::current_mode() != mode::WindowMode::Window {
         return;
     }
@@ -72,7 +74,9 @@ pub fn toggle_window_mode_fullscreen(app: tauri::AppHandle) {
 
 #[tauri::command]
 pub fn minimize_window_mode(app: tauri::AppHandle) {
-    let Some(window) = mode::active_window(&app) else { return };
+    let Some(window) = mode::active_window(&app) else {
+        return;
+    };
     if mode::current_mode() != mode::WindowMode::Window {
         return;
     }
@@ -87,7 +91,9 @@ pub fn close_window_mode(app: tauri::AppHandle) {
 
 #[tauri::command]
 pub fn start_window_mode_dragging(app: tauri::AppHandle) {
-    let Some(window) = mode::active_window(&app) else { return };
+    let Some(window) = mode::active_window(&app) else {
+        return;
+    };
     if mode::current_mode() != mode::WindowMode::Window {
         return;
     }

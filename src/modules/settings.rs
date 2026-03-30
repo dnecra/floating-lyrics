@@ -77,8 +77,12 @@ pub fn lyrics_paused_for_mode(mode: WindowMode) -> bool {
 
 pub fn set_lyrics_paused_for_mode(mode: WindowMode, paused: bool) {
     match mode {
-        WindowMode::Normal => NORMAL_LYRICS_PAUSED.store(paused, std::sync::atomic::Ordering::SeqCst),
-        WindowMode::Window => WINDOW_LYRICS_PAUSED.store(paused, std::sync::atomic::Ordering::SeqCst),
+        WindowMode::Normal => {
+            NORMAL_LYRICS_PAUSED.store(paused, std::sync::atomic::Ordering::SeqCst)
+        }
+        WindowMode::Window => {
+            WINDOW_LYRICS_PAUSED.store(paused, std::sync::atomic::Ordering::SeqCst)
+        }
     }
 }
 
@@ -194,13 +198,7 @@ pub fn save_settings(app: &tauri::AppHandle, settings: &AppSettings) {
     save_settings_for_mode(app, settings, current_mode());
 }
 
-pub fn save_window_mode_bounds(
-    app: &tauri::AppHandle,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-) {
+pub fn save_window_mode_bounds(app: &tauri::AppHandle, x: i32, y: i32, width: u32, height: u32) {
     let mut settings = load_settings_for_mode(app, WindowMode::Window);
     settings.window_mode_x = Some(x);
     settings.window_mode_y = Some(y);

@@ -20,7 +20,7 @@ set "ARCH=%~3"
 
 if "%COMMAND%"=="" goto :help
 if /I "%COMMAND%"=="help" goto :help
-if "%MODE%"=="" set "MODE=serverless"
+if "%MODE%"=="" set "MODE=standalone"
 if "%ARCH%"=="" set "ARCH=host"
 
 if /I "%COMMAND%"=="dev" goto :dev
@@ -30,8 +30,7 @@ goto :help
 
 :resolve_source
 if /I "%MODE%"=="serverless" set "SRC=%SRC_DIR%\serverless.rs" & set "TAURI_CONFIG=tauri.serverless.conf.json" & goto :eof
-if /I "%MODE%"=="withserver" set "SRC=%SRC_DIR%\withserver.rs" & set "TAURI_CONFIG=tauri.withserver.conf.json" & goto :eof
-if /I "%MODE%"=="standalone" set "SRC=%SRC_DIR%\standalone.rs" & set "TAURI_CONFIG=tauri.standalone.conf.json" & goto :eof
+if /I "%MODE%"=="standalone" set "SRC=%SRC_DIR%\standalone.rs" & set "TAURI_CONFIG=tauri.conf.json" & goto :eof
 if /I "%MODE%"=="both" set "SRC=both" & goto :eof
 if /I "%MODE%"=="all" set "SRC=all" & goto :eof
 echo Invalid mode: %MODE%
@@ -134,9 +133,6 @@ if errorlevel 1 exit /b 1
 call :set_main
 if errorlevel 1 exit /b 1
 set "BUILD_CONFIG=%TAURI_CONFIG%"
-if /I "%MODE%"=="standalone" (
-  if /I "%TARGET_TRIPLE%"=="x86_64-pc-windows-msvc" set "BUILD_CONFIG=tauri.standalone.x64.conf.json"
-)
 cargo tauri build --config "%BUILD_CONFIG%" --features %MODE% %TARGET_ARG%
 set "BUILD_ERR=%ERRORLEVEL%"
 if errorlevel 1 exit /b 1
@@ -192,11 +188,11 @@ exit /b 0
 
 :dev
 if /I "%MODE%"=="both" (
-  echo dev supports only one mode at a time: serverless, withserver, or standalone.
+  echo dev supports only one mode at a time: serverless or standalone.
   exit /b 1
 )
 if /I "%MODE%"=="all" (
-  echo dev supports only one mode at a time: serverless, withserver, or standalone.
+  echo dev supports only one mode at a time: serverless or standalone.
   exit /b 1
 )
 call :resolve_source
@@ -237,18 +233,9 @@ exit /b %ERR%
     popd
     exit /b %ERR%
   )
-  set "MODE=withserver"
-  set "SRC=%SRC_DIR%\withserver.rs"
-  set "TAURI_CONFIG=tauri.withserver.conf.json"
-  call :build_current
-  if errorlevel 1 (
-    set "ERR=%ERRORLEVEL%"
-    popd
-    exit /b %ERR%
-  )
   set "MODE=standalone"
   set "SRC=%SRC_DIR%\standalone.rs"
-  set "TAURI_CONFIG=tauri.standalone.conf.json"
+  set "TAURI_CONFIG=tauri.conf.json"
   call :build_current
   set "ERR=%ERRORLEVEL%"
   popd
@@ -256,11 +243,11 @@ exit /b %ERR%
 
 :devwatch
 if /I "%MODE%"=="both" (
-  echo dev-watch supports only one mode at a time: serverless, withserver, or standalone.
+  echo dev-watch supports only one mode at a time: serverless or standalone.
   exit /b 1
 )
 if /I "%MODE%"=="all" (
-  echo dev-watch supports only one mode at a time: serverless, withserver, or standalone.
+  echo dev-watch supports only one mode at a time: serverless or standalone.
   exit /b 1
 )
 call :resolve_source
@@ -289,18 +276,16 @@ exit /b %ERR%
 :help
 echo Usage:
 echo   tauri.cmd dev serverless [host^|x64]
-echo   tauri.cmd dev withserver [host^|x64]
-echo   tauri.cmd dev standalone [host^|x64]
+echo   tauri.cmd dev [standalone] [host^|x64]
 echo   tauri.cmd build serverless [host^|x64]
-echo   tauri.cmd build withserver [host^|x64]
-echo   tauri.cmd build standalone [host^|x64]
+echo   tauri.cmd build [standalone] [host^|x64]
 echo   tauri.cmd build both [host^|x64]
 echo   tauri.cmd build all [host^|x64]
 echo   tauri.cmd dev-watch serverless [host^|x64]
-echo   tauri.cmd dev-watch withserver [host^|x64]
-echo   tauri.cmd dev-watch standalone [host^|x64]
+echo   tauri.cmd dev-watch [standalone] [host^|x64]
 echo.
 echo Examples:
+echo   tauri.cmd build
 echo   tauri.cmd build standalone x64
 echo   tauri.cmd build all x64
 exit /b 1

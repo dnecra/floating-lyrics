@@ -2,8 +2,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use tauri::{menu::Menu, tray::TrayIconBuilder, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::webview::Color;
+use tauri::{menu::Menu, tray::TrayIconBuilder, Manager, WebviewUrl, WebviewWindowBuilder};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::HiDpi::{
@@ -15,7 +16,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MENU, VK_
 use crate::modules::{
     click_through, commands, lock, menu,
     mode::{self, WindowMode},
-    network, scripts, settings, window,
+    network, scripts, settings, update, window,
 };
 
 // ── Serverless remote endpoints ──────────────────────────────────────────────
@@ -24,14 +25,13 @@ const SERVERLESS_FALLBACK_IP: &str = "192.168.0.101";
 const SERVERLESS_PORT: u16 = 80;
 const SERVERLESS_LYRICS_PATH: &str = "/lyrics";
 
-// ── Embedded-server endpoints (withserver / standalone) ──────────────────────
+// ── Embedded-server endpoints (standalone) ───────────────────────────────────
 const LOCAL_HOST: &str = "127.0.0.1";
 const LOCAL_PORT: u16 = 1312;
 const LOCAL_LYRICS_PATH: &str = "/lyrics";
 const LOCAL_WELCOME_PATH: &str = "/welcome";
 
 // ── Embedded executable paths (relative to resource dir) ─────────────────────
-const WITHSERVER_EXE_RELATIVE: &str = "source/lyrics-ytm.exe";
 const STANDALONE_EXE_RELATIVE: &str = "source/lyrics-smtc-x64.exe";
 
 // ── Scripts bundled at compile time ──────────────────────────────────────────
@@ -62,6 +62,7 @@ lazy_static::lazy_static! {
     #[cfg(target_os = "windows")]
     static ref SERVER_JOB: Mutex<Option<isize>> = Mutex::new(None);
     static ref RUNTIME_ENDPOINT: Mutex<Option<RuntimeEndpoint>> = Mutex::new(None);
+    static ref RUNTIME_EMBEDDED_EXE: Mutex<Option<&'static str>> = Mutex::new(None);
 }
 
 static APP_EXITING: AtomicBool = AtomicBool::new(false);
@@ -71,7 +72,6 @@ static APP_EXITING: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
     Serverless,
-    WithServer,
     Standalone,
 }
 
@@ -107,14 +107,6 @@ impl RuntimeConfig {
                 embedded_exe: None,
                 // Serverless has no local server → no /welcome endpoint.
                 has_welcome: false,
-            },
-            Variant::WithServer => Self {
-                primary_ip: LOCAL_HOST,
-                fallback_ip: None,
-                port: LOCAL_PORT,
-                lyrics_path: LOCAL_LYRICS_PATH,
-                embedded_exe: Some(WITHSERVER_EXE_RELATIVE),
-                has_welcome: true,
             },
             Variant::Standalone => Self {
                 primary_ip: LOCAL_HOST,
@@ -163,6 +155,9 @@ pub fn run(variant: Variant) {
             port: cfg.port,
             lyrics_path: cfg.lyrics_path,
         });
+    }
+    if let Ok(mut slot) = RUNTIME_EMBEDDED_EXE.lock() {
+        *slot = cfg.embedded_exe;
     }
 
     let run_result = tauri::Builder::default()
@@ -246,6 +241,44 @@ pub fn run(variant: Variant) {
             commands::close_app,
         ])
         .setup(move |app| {
+            // Build tray menu early so bootstrap download state is visible immediately.
+            let menu_items = menu::build_menu_items(&app.handle())?;
+            let menu_refs: Vec<&dyn tauri::menu::IsMenuItem<_>> = menu_items
+                .iter()
+                .map(|i| i as &dyn tauri::menu::IsMenuItem<_>)
+                .collect();
+            let tray_menu = Menu::with_items(app, menu_refs.as_slice())?;
+            menu::set_runtime_tray_menu(tray_menu.clone());
+
+            let _tray = TrayIconBuilder::new()
+                .icon(
+                    app.default_window_icon()
+                        .expect("default window icon")
+                        .clone(),
+                )
+                .tooltip("Floating Lyrics")
+                .menu(&tray_menu)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        update::start_update_check(tray.app_handle().clone());
+                    }
+                })
+                .on_menu_event(move |app, event| {
+                    menu::handle_menu_event(app, event.id.as_ref());
+                })
+                .build(app)?;
+
+            if let Err(error) =
+                update::ensure_server_ready(&app.handle(), variant, cfg.embedded_exe)
+            {
+                eprintln!("Failed to prepare standalone server: {error}");
+            }
+
             // Start embedded server if this variant has one and it isn't already running.
             if let Some(exe) = cfg.embedded_exe {
                 start_embedded_server(app.handle().clone(), exe);
@@ -292,13 +325,13 @@ pub fn run(variant: Variant) {
             // Navigate to welcome or lyrics.
             // For welcome: we must wait until the server is ready on /welcome
             // before navigating (same wait-for-server pattern as /lyrics).
-            let startup_path = if show_welcome { LOCAL_WELCOME_PATH } else { cfg.lyrics_path };
-            let initial_url = network::get_working_url(
-                cfg.primary_ip,
-                cfg.fallback_ip,
-                cfg.port,
-                startup_path,
-            );
+            let startup_path = if show_welcome {
+                LOCAL_WELCOME_PATH
+            } else {
+                cfg.lyrics_path
+            };
+            let initial_url =
+                network::get_working_url(cfg.primary_ip, cfg.fallback_ip, cfg.port, startup_path);
             let initial_lyrics_url = if show_welcome {
                 None
             } else {
@@ -348,23 +381,8 @@ pub fn run(variant: Variant) {
             window::start_layout_hover_controller(window.clone());
             start_click_through_hotkey_guard(app.handle().clone());
 
-            // Build tray menu.
-            let menu_items = menu::build_menu_items(&app.handle())?;
-            let menu_refs: Vec<&dyn tauri::menu::IsMenuItem<_>> =
-                menu_items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<_>).collect();
-            let tray_menu = Menu::with_items(app, menu_refs.as_slice())?;
-            menu::set_runtime_tray_menu(tray_menu.clone());
-
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().expect("default window icon").clone())
-                .tooltip("Floating Lyrics")
-                .menu(&tray_menu)
-                .on_menu_event(move |app, event| {
-                    menu::handle_menu_event(app, event.id.as_ref());
-                })
-                .build(app)?;
-
             menu::update_color_menu_labels(&app.handle());
+            update::initialize(app.handle().clone(), variant, cfg.embedded_exe);
 
             // Show the window.
             if show_welcome {
@@ -391,7 +409,9 @@ pub fn open_welcome_in_main_window(app: &tauri::AppHandle) {
     if mode::current_mode() != WindowMode::Normal {
         switch_window_mode(app, WindowMode::Normal);
     }
-    let Some(window) = app.get_webview_window(mode::NORMAL_WINDOW_LABEL) else { return };
+    let Some(window) = app.get_webview_window(mode::NORMAL_WINDOW_LABEL) else {
+        return;
+    };
     let url = format!("http://{}:{}{}", LOCAL_HOST, LOCAL_PORT, LOCAL_WELCOME_PATH);
     window::enter_welcome_mode(&window);
     let _ = window.navigate(url.parse().expect("valid URL"));
@@ -407,6 +427,20 @@ pub fn restart_app(app: &tauri::AppHandle) {
 
 pub fn mark_app_exiting() {
     APP_EXITING.store(true, Ordering::SeqCst);
+}
+
+pub fn stop_embedded_server_process() {
+    stop_embedded_server();
+}
+
+pub fn start_embedded_server_process(app: &tauri::AppHandle) -> Result<(), String> {
+    let exe_relative = RUNTIME_EMBEDDED_EXE
+        .lock()
+        .map_err(|_| "Embedded server state is unavailable".to_string())?
+        .to_owned()
+        .ok_or_else(|| "This runtime variant has no embedded server".to_string())?;
+    start_embedded_server(app.clone(), exe_relative);
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -488,13 +522,11 @@ fn ensure_window_mode_window(app: &tauri::AppHandle) -> tauri::Result<tauri::Web
     .inner_size(width as f64, height as f64)
     .min_inner_size(256.0, 256.0)
     .initialization_script(WINDOW_MODE_INIT_SCRIPT)
-    .data_directory(data_dir)
-    ;
+    .data_directory(data_dir);
 
-    let builder = if let (Some(x), Some(y)) = (
-        window_settings.window_mode_x,
-        window_settings.window_mode_y,
-    ) {
+    let builder = if let (Some(x), Some(y)) =
+        (window_settings.window_mode_x, window_settings.window_mode_y)
+    {
         builder.position(x as f64, y as f64)
     } else {
         builder.center()
@@ -529,7 +561,9 @@ pub fn switch_window_mode(app: &tauri::AppHandle, target_mode: WindowMode) {
         WindowMode::Normal => app.get_webview_window(mode::NORMAL_WINDOW_LABEL),
         WindowMode::Window => ensure_window_mode_window(app).ok(),
     };
-    let Some(target_window) = target_window else { return };
+    let Some(target_window) = target_window else {
+        return;
+    };
 
     if let Some(current_window) = mode::get_window(app, current_mode) {
         if current_mode == WindowMode::Window {
@@ -565,7 +599,11 @@ pub fn switch_window_mode(app: &tauri::AppHandle, target_mode: WindowMode) {
         scripts::inject_scripts_rapidly(
             target_window.clone(),
             &SCRIPTS,
-            if needs_navigation { STARTUP_INJECTION_PASSES } else { 2 },
+            if needs_navigation {
+                STARTUP_INJECTION_PASSES
+            } else {
+                2
+            },
             target_mode,
         );
     }
@@ -664,6 +702,9 @@ fn start_embedded_server(app: tauri::AppHandle, exe_relative: &str) {
     let cwd = std::env::current_dir().ok();
 
     let mut candidates = Vec::new();
+    if let Some(path) = update::managed_server_exe_path(&app, exe_relative) {
+        candidates.push(path);
+    }
     if let Some(dir) = resource_dir.as_ref() {
         candidates.push(dir.join(exe_relative));
         if let Some(file_name) = std::path::Path::new(exe_relative).file_name() {
@@ -683,7 +724,11 @@ fn start_embedded_server(app: tauri::AppHandle, exe_relative: &str) {
             continue;
         }
         let mut cmd = std::process::Command::new(&candidate);
-        cmd.current_dir(candidate.parent().unwrap_or_else(|| std::path::Path::new(".")));
+        cmd.current_dir(
+            candidate
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        );
 
         #[cfg(target_os = "windows")]
         {
@@ -700,10 +745,17 @@ fn start_embedded_server(app: tauri::AppHandle, exe_relative: &str) {
                 if let Ok(mut slot) = EMBEDDED_SERVER_CHILD.lock() {
                     *slot = Some(child);
                 }
-                println!("Started embedded server: {} (pid {})", candidate.display(), pid);
+                println!(
+                    "Started embedded server: {} (pid {})",
+                    candidate.display(),
+                    pid
+                );
             }
             Err(e) => {
-                eprintln!("Found server exe but failed to start {}: {e}", candidate.display());
+                eprintln!(
+                    "Found server exe but failed to start {}: {e}",
+                    candidate.display()
+                );
             }
         }
         return;
@@ -717,7 +769,9 @@ fn stop_embedded_server() {
         Ok(mut g) => g.take(),
         Err(_) => None,
     };
-    let Some(mut child) = child_opt.take() else { return };
+    let Some(mut child) = child_opt.take() else {
+        return;
+    };
 
     #[cfg(target_os = "windows")]
     {
@@ -747,7 +801,9 @@ fn attach_child_to_job_object(child: &std::process::Child) {
     };
 
     if guard.is_none() {
-        let Ok(job) = (unsafe { CreateJobObjectW(None, None) }) else { return };
+        let Ok(job) = (unsafe { CreateJobObjectW(None, None) }) else {
+            return;
+        };
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         let ok = unsafe {
@@ -758,7 +814,9 @@ fn attach_child_to_job_object(child: &std::process::Child) {
                 size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             )
         };
-        if ok.is_err() { return; }
+        if ok.is_err() {
+            return;
+        }
         *guard = Some(job.0 as isize);
     }
 
@@ -819,8 +877,7 @@ fn run_local_api(alive: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     let cors = Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap();
     let cors_methods =
         Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, OPTIONS").unwrap();
-    let cors_headers =
-        Header::from_bytes("Access-Control-Allow-Headers", "Content-Type").unwrap();
+    let cors_headers = Header::from_bytes("Access-Control-Allow-Headers", "Content-Type").unwrap();
     let json_header = Header::from_bytes("Content-Type", "application/json").unwrap();
 
     while alive.load(Ordering::Relaxed) {

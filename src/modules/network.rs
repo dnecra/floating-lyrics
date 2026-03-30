@@ -77,7 +77,9 @@ pub fn start_connectivity_monitor(
                 continue;
             }
 
-            let Some(win) = mode::active_window(&app_handle) else { continue };
+            let Some(win) = mode::active_window(&app_handle) else {
+                continue;
+            };
             let current_mode = mode::current_mode();
 
             let current_url = get_working_url(primary_ip, fallback_ip, port, lyrics_path);

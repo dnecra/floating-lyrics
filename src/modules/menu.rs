@@ -1,9 +1,7 @@
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
-use std::net::{IpAddr, Ipv4Addr, UdpSocket};
-use tauri::{
-    menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem},
-};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::modules::mode::{self, WindowMode};
@@ -13,6 +11,8 @@ use crate::modules::window::*;
 
 lazy_static::lazy_static! {
     static ref TRAY_MENU_HANDLE: Mutex<Option<Menu<tauri::Wry>>> = Mutex::new(None);
+    static ref SERVER_UPDATE_MENU_ITEM: Mutex<Option<MenuItem<tauri::Wry>>> = Mutex::new(None);
+    static ref SERVER_UPDATE_SEPARATOR: Mutex<Option<PredefinedMenuItem<tauri::Wry>>> = Mutex::new(None);
 }
 
 pub fn set_runtime_tray_menu(menu: Menu<tauri::Wry>) {
@@ -174,6 +174,8 @@ pub fn update_color_menu_labels(app: &tauri::AppHandle) {
             }
         }
     }
+
+    sync_server_update_menu(app);
 }
 
 // Build menu items (common to both versions)
@@ -213,8 +215,7 @@ pub fn build_menu_items(
             let id = format!("monitor_{}", idx);
             let name = format!("Monitor {}", idx + 1);
             menu_items.push(
-                CheckMenuItem::with_id(app, &id, name, true, selected == idx, None::<&str>)?
-                    .kind(),
+                CheckMenuItem::with_id(app, &id, name, true, selected == idx, None::<&str>)?.kind(),
             );
         }
     }
@@ -309,6 +310,11 @@ pub fn build_menu_items(
 pub fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
     if event_id == "quit" {
         app.exit(0);
+        return;
+    }
+
+    if event_id == "server_update_action" {
+        crate::modules::update::handle_tray_action(app.clone());
         return;
     }
 
@@ -442,4 +448,72 @@ pub fn toggle_lyrics_pause(app: &tauri::AppHandle) {
     }
 
     println!("Lyrics paused: {}", new_state);
+}
+
+pub fn sync_server_update_menu(app: &tauri::AppHandle) {
+    let Some(menu) = active_menu(app) else { return };
+    let descriptor = crate::modules::update::tray_menu_descriptor();
+
+    match descriptor {
+        Some((text, enabled)) => {
+            let item = if let Ok(mut slot) = SERVER_UPDATE_MENU_ITEM.lock() {
+                if let Some(item) = slot.as_ref() {
+                    item.clone()
+                } else {
+                    let Ok(created) = MenuItem::with_id(
+                        app,
+                        "server_update_action",
+                        &text,
+                        enabled,
+                        None::<&str>,
+                    ) else {
+                        return;
+                    };
+                    *slot = Some(created.clone());
+                    created
+                }
+            } else {
+                return;
+            };
+
+            let separator = if let Ok(mut slot) = SERVER_UPDATE_SEPARATOR.lock() {
+                if let Some(separator) = slot.as_ref() {
+                    separator.clone()
+                } else {
+                    let Ok(created) = PredefinedMenuItem::separator(app) else {
+                        return;
+                    };
+                    *slot = Some(created.clone());
+                    created
+                }
+            } else {
+                return;
+            };
+
+            let _ = item.set_text(&text);
+            let _ = item.set_enabled(enabled);
+
+            if menu.get("server_update_action").is_none() {
+                let _ = menu.insert(&item, 0);
+            }
+
+            if menu.get(separator.id()).is_none() {
+                let _ = menu.insert(&separator, 1);
+            }
+        }
+        None => {
+            if menu.get("server_update_action").is_some() {
+                if let Ok(slot) = SERVER_UPDATE_MENU_ITEM.lock() {
+                    if let Some(item) = slot.as_ref() {
+                        let _ = menu.remove(item);
+                    }
+                }
+            }
+            if let Ok(slot) = SERVER_UPDATE_SEPARATOR.lock() {
+                if let Some(separator) = slot.as_ref() {
+                    let _ = menu.remove(separator);
+                }
+            }
+        }
+    }
 }

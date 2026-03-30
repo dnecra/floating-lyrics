@@ -49,7 +49,11 @@ fn set_click_through_inner(app: &AppHandle, enabled: bool, persist: bool) {
         // Sync tray menu label.
         if let Some(item) = app.menu().and_then(|m| m.get("click_through")) {
             if let Some(mi) = item.as_menuitem() {
-                let label = if enabled { "[x] Click-through" } else { "[ ] Click-through" };
+                let label = if enabled {
+                    "[x] Click-through"
+                } else {
+                    "[ ] Click-through"
+                };
                 let _ = mi.set_text(label);
             }
         }
