@@ -2,9 +2,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+use tauri::tray::TrayIconBuilder;
 use tauri::webview::Color;
-use tauri::{menu::Menu, tray::TrayIconBuilder, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{menu::Menu, Manager, WebviewUrl, WebviewWindowBuilder};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::HiDpi::{
@@ -19,22 +19,22 @@ use crate::modules::{
     network, scripts, settings, update, window,
 };
 
-// ── Serverless remote endpoints ──────────────────────────────────────────────
+// â”€â”€ Serverless remote endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const SERVERLESS_PRIMARY_IP: &str = "192.168.99.47";
 const SERVERLESS_FALLBACK_IP: &str = "192.168.0.101";
 const SERVERLESS_PORT: u16 = 80;
 const SERVERLESS_LYRICS_PATH: &str = "/lyrics";
 
-// ── Embedded-server endpoints (standalone) ───────────────────────────────────
+// â”€â”€ Embedded-server endpoints (standalone) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const LOCAL_HOST: &str = "127.0.0.1";
 const LOCAL_PORT: u16 = 1312;
 const LOCAL_LYRICS_PATH: &str = "/lyrics";
 const LOCAL_WELCOME_PATH: &str = "/welcome";
 
-// ── Embedded executable paths (relative to resource dir) ─────────────────────
+// â”€â”€ Embedded executable paths (relative to resource dir) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const STANDALONE_EXE_RELATIVE: &str = "source/lyrics-smtc-x64.exe";
 
-// ── Scripts bundled at compile time ──────────────────────────────────────────
+// â”€â”€ Scripts bundled at compile time â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const TRANSPARENT_BG_SCRIPT: &str = include_str!("../scripts/transparent-bg.js");
 const LAYOUT_HOVER_SCRIPT: &str = include_str!("../scripts/layout-hover-bounds.js");
 const CLOSE_WINDOW_SCRIPT: &str = include_str!("../scripts/close-window-control.js");
@@ -55,8 +55,10 @@ static SCRIPTS: scripts::Scripts = scripts::Scripts {
 
 const STARTUP_INJECTION_PASSES: u32 = 8;
 const WINDOWS_STARTUP_ARG: &str = "--windows-startup";
+const SERVER_READY_TIMEOUT_SECS: u64 = 30;
+const SERVER_READY_POLL_MS: u64 = 250;
 
-// ── Embedded child process handle ─────────────────────────────────────────────
+// â”€â”€ Embedded child process handle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 lazy_static::lazy_static! {
     static ref EMBEDDED_SERVER_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
     #[cfg(target_os = "windows")]
@@ -66,8 +68,10 @@ lazy_static::lazy_static! {
 }
 
 static APP_EXITING: AtomicBool = AtomicBool::new(false);
+static STARTUP_COMPLETE: AtomicBool = AtomicBool::new(false);
+static STARTUP_SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-// ── App variant ───────────────────────────────────────────────────────────────
+// â”€â”€ App variant â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
@@ -75,7 +79,8 @@ pub enum Variant {
     Standalone,
 }
 
-// ── Per-variant runtime config ────────────────────────────────────────────────
+// â”€â”€ Per-variant runtime config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+#[derive(Clone, Copy)]
 struct RuntimeConfig {
     /// IP / hostname of the lyrics server.
     primary_ip: &'static str,
@@ -105,7 +110,7 @@ impl RuntimeConfig {
                 port: SERVERLESS_PORT,
                 lyrics_path: SERVERLESS_LYRICS_PATH,
                 embedded_exe: None,
-                // Serverless has no local server → no /welcome endpoint.
+                // Serverless has no local server â†’ no /welcome endpoint.
                 has_welcome: false,
             },
             Variant::Standalone => Self {
@@ -120,9 +125,9 @@ impl RuntimeConfig {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Entry point
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 pub fn run(variant: Variant) {
     let cfg = RuntimeConfig::for_variant(variant);
     let launched_via_windows_startup = is_windows_startup_launch();
@@ -258,140 +263,29 @@ pub fn run(variant: Variant) {
                 )
                 .tooltip("Floating Lyrics")
                 .menu(&tray_menu)
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        update::start_update_check(tray.app_handle().clone());
-                    }
-                })
+                .on_tray_icon_event(|_tray, _event| {})
                 .on_menu_event(move |app, event| {
                     menu::handle_menu_event(app, event.id.as_ref());
                 })
                 .build(app)?;
 
-            if let Err(error) =
-                update::ensure_server_ready(&app.handle(), variant, cfg.embedded_exe)
-            {
-                eprintln!("Failed to prepare standalone server: {error}");
-            }
+            let app_handle = app.handle().clone();
+            update::initialize(app_handle.clone(), variant, cfg.embedded_exe);
 
-            // Start embedded server if this variant has one and it isn't already running.
-            if let Some(exe) = cfg.embedded_exe {
-                start_embedded_server(app.handle().clone(), exe);
-            }
-
-            let window = ensure_main_window(&app.handle())?;
-
-            // Load persisted settings.
-            mode::set_current_mode(WindowMode::Normal);
-            let mut loaded_settings =
-                settings::load_settings_for_mode(&app.handle(), WindowMode::Normal);
-            settings::set_lyrics_paused_for_mode(
-                WindowMode::Normal,
-                settings::lyrics_paused_for_mode(WindowMode::Normal),
-            );
-            settings::set_lyrics_paused_for_mode(
-                WindowMode::Window,
-                settings::lyrics_paused_for_mode(WindowMode::Window),
-            );
-            settings::LYRICS_PAUSED.store(
-                settings::lyrics_paused_for_mode(WindowMode::Normal),
-                Ordering::SeqCst,
-            );
-
-            // Only show welcome for a normal first launch, not for Windows auto-start.
-            let show_welcome = cfg.has_welcome
-                && !launched_via_windows_startup
-                && !loaded_settings.has_seen_welcome;
-            if show_welcome {
-                // Mark as seen so the next launch goes straight to /lyrics.
-                loaded_settings.has_seen_welcome = true;
-                settings::save_settings(&app.handle(), &loaded_settings);
-            }
-
-            // Force click-through on at startup (will be overridden if welcome is shown).
-            loaded_settings.click_through_enabled = true;
-            settings::apply_loaded_settings(&loaded_settings);
-
-            window::apply_windows_visual_tweaks(&window);
-            window::setup_window_position(&app.handle(), &window);
-            window::setup_window_events(&window);
-            let _ = ensure_window_mode_window(app.handle());
-
-            // Navigate to welcome or lyrics.
-            // For welcome: we must wait until the server is ready on /welcome
-            // before navigating (same wait-for-server pattern as /lyrics).
-            let startup_path = if show_welcome {
-                LOCAL_WELCOME_PATH
-            } else {
-                cfg.lyrics_path
-            };
-            let initial_url =
-                network::get_working_url(cfg.primary_ip, cfg.fallback_ip, cfg.port, startup_path);
-            let initial_lyrics_url = if show_welcome {
-                None
-            } else {
-                initial_url.clone()
-            };
-            if let Some(url) = initial_url.as_ref() {
-                let _ = window.navigate(url.parse().expect("valid URL"));
-                let _ = window.eval(TRANSPARENT_BG_SCRIPT);
-                if !show_welcome {
-                    scripts::inject_scripts_rapidly(
-                        window.clone(),
-                        &SCRIPTS,
-                        STARTUP_INJECTION_PASSES,
-                        WindowMode::Normal,
-                    );
+            thread::spawn(move || {
+                if let Err(error) = prepare_runtime_server(&app_handle, variant, cfg) {
+                    eprintln!("Failed to prepare standalone server: {error}");
                 }
-            }
 
-            // Prime the welcome-mode flag BEFORE apply_settings so that
-            // apply_settings skips setting cursor-events (enter/exit_welcome_mode owns that).
-            if show_welcome {
-                window::WELCOME_MODE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-
-            // Apply persisted settings (scripts, colors, etc.) — cursor-event
-            // state is handled by enter/exit_welcome_mode below.
-            window::apply_settings(&app.handle(), &loaded_settings, &SCRIPTS);
-
-            if show_welcome {
-                window::enter_welcome_mode(&window);
-            } else {
-                window::exit_welcome_mode(&window);
-            }
-
-            // Start background connectivity monitor.
-            network::start_connectivity_monitor(
-                app.handle().clone(),
-                cfg.primary_ip,
-                cfg.fallback_ip,
-                cfg.port,
-                cfg.lyrics_path,
-                &SCRIPTS,
-                initial_lyrics_url,
-            );
-
-            window::start_monitor_watcher(window.clone());
-            window::start_layout_hover_controller(window.clone());
-            start_click_through_hotkey_guard(app.handle().clone());
-
-            menu::update_color_menu_labels(&app.handle());
-            update::initialize(app.handle().clone(), variant, cfg.embedded_exe);
-
-            // Show the window.
-            if show_welcome {
-                window::show_and_focus_immediate(&window);
-            } else {
-                window::show_and_focus_immediate(&window);
-            }
-            window::apply_always_on_top_preference(&window);
-
+                let app_for_finish = app_handle.clone();
+                let _ = app_handle.run_on_main_thread(move || {
+                    if let Err(error) =
+                        complete_startup(&app_for_finish, cfg, launched_via_windows_startup)
+                    {
+                        eprintln!("Failed to finalize app startup: {error}");
+                    }
+                });
+            });
             Ok(())
         })
         .run(tauri::generate_context!());
@@ -400,12 +294,16 @@ pub fn run(variant: Variant) {
     run_result.expect("error while running tauri application");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Public helpers called from menu / other modules
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Open the /welcome page in the existing main window (called from tray "Open Guide").
 pub fn open_welcome_in_main_window(app: &tauri::AppHandle) {
+    STARTUP_SHOW_REQUESTED.store(true, Ordering::SeqCst);
+    if !STARTUP_COMPLETE.load(Ordering::SeqCst) {
+        return;
+    }
     if mode::current_mode() != WindowMode::Normal {
         switch_window_mode(app, WindowMode::Normal);
     }
@@ -418,6 +316,149 @@ pub fn open_welcome_in_main_window(app: &tauri::AppHandle) {
     window::animate_show_and_focus(&window);
 }
 
+fn prepare_runtime_server(
+    app: &tauri::AppHandle,
+    variant: Variant,
+    cfg: RuntimeConfig,
+) -> Result<(), String> {
+    if variant != Variant::Standalone {
+        return Ok(());
+    }
+
+    update::ensure_server_ready(app, variant, cfg.embedded_exe)?;
+
+    if let Some(exe) = cfg.embedded_exe {
+        start_embedded_server(app.clone(), exe);
+        if !wait_for_server_ready(
+            cfg.primary_ip,
+            cfg.fallback_ip,
+            cfg.port,
+            cfg.lyrics_path,
+            Duration::from_secs(SERVER_READY_TIMEOUT_SECS),
+        ) {
+            return Err(format!(
+                "Standalone server did not become ready at {}:{}{} within {} seconds",
+                cfg.primary_ip, cfg.port, cfg.lyrics_path, SERVER_READY_TIMEOUT_SECS
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn complete_startup(
+    app: &tauri::AppHandle,
+    cfg: RuntimeConfig,
+    launched_via_windows_startup: bool,
+) -> tauri::Result<()> {
+    let window = ensure_main_window(app)?;
+
+    mode::set_current_mode(WindowMode::Normal);
+    let mut loaded_settings = settings::load_settings_for_mode(app, WindowMode::Normal);
+    settings::set_lyrics_paused_for_mode(
+        WindowMode::Normal,
+        settings::lyrics_paused_for_mode(WindowMode::Normal),
+    );
+    settings::set_lyrics_paused_for_mode(
+        WindowMode::Window,
+        settings::lyrics_paused_for_mode(WindowMode::Window),
+    );
+    settings::LYRICS_PAUSED.store(
+        settings::lyrics_paused_for_mode(WindowMode::Normal),
+        Ordering::SeqCst,
+    );
+
+    let show_welcome =
+        cfg.has_welcome && !launched_via_windows_startup && !loaded_settings.has_seen_welcome;
+    if show_welcome {
+        loaded_settings.has_seen_welcome = true;
+        settings::save_settings(app, &loaded_settings);
+    }
+
+    loaded_settings.click_through_enabled = true;
+    settings::apply_loaded_settings(&loaded_settings);
+
+    window::apply_windows_visual_tweaks(&window);
+    window::setup_window_position(app, &window);
+    window::setup_window_events(&window);
+    let _ = ensure_window_mode_window(app);
+
+    let startup_path = if show_welcome {
+        LOCAL_WELCOME_PATH
+    } else {
+        cfg.lyrics_path
+    };
+    let initial_url =
+        network::get_working_url(cfg.primary_ip, cfg.fallback_ip, cfg.port, startup_path);
+    let initial_lyrics_url = if show_welcome {
+        None
+    } else {
+        initial_url.clone()
+    };
+    if let Some(url) = initial_url.as_ref() {
+        let _ = window.navigate(url.parse().expect("valid URL"));
+        let _ = window.eval(TRANSPARENT_BG_SCRIPT);
+        if !show_welcome {
+            scripts::inject_scripts_rapidly(
+                window.clone(),
+                &SCRIPTS,
+                STARTUP_INJECTION_PASSES,
+                WindowMode::Normal,
+            );
+        }
+    }
+
+    if show_welcome {
+        window::WELCOME_MODE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    window::apply_settings(app, &loaded_settings, &SCRIPTS);
+
+    if show_welcome {
+        window::enter_welcome_mode(&window);
+    } else {
+        window::exit_welcome_mode(&window);
+    }
+
+    network::start_connectivity_monitor(
+        app.clone(),
+        cfg.primary_ip,
+        cfg.fallback_ip,
+        cfg.port,
+        cfg.lyrics_path,
+        &SCRIPTS,
+        initial_lyrics_url,
+    );
+
+    window::start_monitor_watcher(window.clone());
+    window::start_layout_hover_controller(window.clone());
+    start_click_through_hotkey_guard(app.clone());
+
+    menu::update_color_menu_labels(app);
+    STARTUP_COMPLETE.store(true, Ordering::SeqCst);
+    show_main_window(app);
+    window::apply_always_on_top_preference(&window);
+
+    Ok(())
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if mode::current_mode() != WindowMode::Normal {
+        switch_window_mode(app, WindowMode::Normal);
+        return;
+    }
+
+    let Some(window) = app.get_webview_window(mode::NORMAL_WINDOW_LABEL) else {
+        return;
+    };
+
+    if STARTUP_SHOW_REQUESTED.swap(false, Ordering::SeqCst)
+        || !window.is_visible().unwrap_or(false)
+    {
+        window::show_and_focus_immediate(&window);
+        window::apply_always_on_top_preference(&window);
+    }
+}
 pub fn restart_app(app: &tauri::AppHandle) {
     APP_EXITING.store(true, Ordering::SeqCst);
     stop_embedded_server();
@@ -443,9 +484,9 @@ pub fn start_embedded_server_process(app: &tauri::AppHandle) -> Result<(), Strin
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // URL helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 pub fn is_welcome_url(url: &str) -> bool {
     url.contains("/welcome") || url.contains("/guide")
 }
@@ -466,6 +507,23 @@ fn current_lyrics_url() -> Option<String> {
         endpoint.port,
         endpoint.lyrics_path,
     )
+}
+
+fn wait_for_server_ready(
+    primary_ip: &str,
+    fallback_ip: Option<&str>,
+    port: u16,
+    path: &str,
+    timeout: Duration,
+) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < timeout {
+        if network::get_working_url(primary_ip, fallback_ip, port, path).is_some() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(SERVER_READY_POLL_MS));
+    }
+    network::get_working_url(primary_ip, fallback_ip, port, path).is_some()
 }
 
 fn webview_data_directory(app: &tauri::AppHandle, folder_name: &str) -> std::path::PathBuf {
@@ -639,9 +697,9 @@ pub fn close_window_mode(app: &tauri::AppHandle) {
     switch_window_mode(app, WindowMode::Normal);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Click-through hotkey guard  (Alt+Shift+F  →  temporarily disable)
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Click-through hotkey guard  (Alt+Shift+F  â†’  temporarily disable)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 fn start_click_through_hotkey_guard(app: tauri::AppHandle) {
     #[cfg(target_os = "windows")]
     thread::spawn(move || {
@@ -687,81 +745,61 @@ fn is_alt_shift_f_down() -> bool {
     alt && shift && f
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Embedded server lifecycle
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 fn start_embedded_server(app: tauri::AppHandle, exe_relative: &str) {
     if network::is_endpoint_reachable(LOCAL_HOST, LOCAL_PORT, LOCAL_LYRICS_PATH) {
         return; // Already running (e.g. dev mode).
     }
 
-    let resource_dir = app.path().resource_dir().ok();
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-    let cwd = std::env::current_dir().ok();
-
-    let mut candidates = Vec::new();
-    if let Some(path) = update::managed_server_exe_path(&app, exe_relative) {
-        candidates.push(path);
-    }
-    if let Some(dir) = resource_dir.as_ref() {
-        candidates.push(dir.join(exe_relative));
-        if let Some(file_name) = std::path::Path::new(exe_relative).file_name() {
-            candidates.push(dir.join(file_name));
-        }
-    }
-    if let Some(dir) = exe_dir.as_ref() {
-        candidates.push(dir.join("resources").join(exe_relative));
-        candidates.push(dir.join(exe_relative));
-    }
-    if let Some(dir) = cwd.as_ref() {
-        candidates.push(dir.join(exe_relative));
-    }
-
-    for candidate in candidates {
-        if !candidate.exists() {
-            continue;
-        }
-        let mut cmd = std::process::Command::new(&candidate);
-        cmd.current_dir(
-            candidate
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new(".")),
+    let Some(candidate) = update::managed_server_exe_path(&app, exe_relative) else {
+        eprintln!("Could not resolve managed embedded server path: {exe_relative}");
+        return;
+    };
+    if !candidate.exists() {
+        eprintln!(
+            "Managed embedded server executable is missing: {}",
+            candidate.display()
         );
-
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-
-        match cmd.spawn() {
-            Ok(child) => {
-                let pid = child.id();
-                #[cfg(target_os = "windows")]
-                attach_child_to_job_object(&child);
-                if let Ok(mut slot) = EMBEDDED_SERVER_CHILD.lock() {
-                    *slot = Some(child);
-                }
-                println!(
-                    "Started embedded server: {} (pid {})",
-                    candidate.display(),
-                    pid
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "Found server exe but failed to start {}: {e}",
-                    candidate.display()
-                );
-            }
-        }
         return;
     }
 
-    eprintln!("Could not find embedded server executable: {exe_relative}");
+    let mut cmd = std::process::Command::new(&candidate);
+    cmd.current_dir(
+        candidate
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    );
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    match cmd.spawn() {
+        Ok(child) => {
+            let pid = child.id();
+            #[cfg(target_os = "windows")]
+            attach_child_to_job_object(&child);
+            if let Ok(mut slot) = EMBEDDED_SERVER_CHILD.lock() {
+                *slot = Some(child);
+            }
+            println!(
+                "Started embedded server: {} (pid {})",
+                candidate.display(),
+                pid
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "Found server exe but failed to start {}: {e}",
+                candidate.display()
+            );
+        }
+    }
 }
 
 fn stop_embedded_server() {
@@ -826,9 +864,9 @@ fn attach_child_to_job_object(child: &std::process::Child) {
     let _ = unsafe { AssignProcessToJobObject(job, process) };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // WebView2 hardware acceleration tweak (Windows only)
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 #[cfg(target_os = "windows")]
 fn configure_webview2_hardware_acceleration() {
     let current = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
@@ -861,9 +899,9 @@ fn configure_webview2_hardware_acceleration() {
     std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args.join(" "));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Serverless local API  (feature-gated)
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 #[cfg(feature = "serverless")]
 fn run_local_api(alive: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     use std::sync::atomic::Ordering;

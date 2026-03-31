@@ -1,5 +1,4 @@
 use reqwest::blocking::Client;
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -13,7 +12,6 @@ use tauri::{AppHandle, Manager};
 use crate::app_runtime::Variant;
 
 const UPDATE_CHECK_DELAY_SECS: u64 = 10;
-const UPDATE_CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
 const SERVER_UPDATE_FILE: &str = "server-update.json";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const STANDALONE_RELEASE_OWNER: &str = match option_env!("FLOATING_LYRICS_STANDALONE_RELEASE_OWNER")
@@ -26,11 +24,17 @@ const STANDALONE_RELEASE_REPO: &str = match option_env!("FLOATING_LYRICS_STANDAL
     None => "lyrics-server",
 };
 const USER_AGENT: &str = "floating-lyrics-updater";
+const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 10;
+const GITHUB_REQUEST_TIMEOUT_SECS: u64 = 180;
+const RELEASE_FETCH_RETRIES: usize = 5;
+const RELEASE_DOWNLOAD_RETRIES: usize = 5;
+const RETRY_DELAY_SECS: u64 = 2;
 
 lazy_static::lazy_static! {
     static ref UPDATE_CONTEXT: Mutex<Option<UpdateContext>> = Mutex::new(None);
     static ref UPDATE_STATE: Mutex<ServerUpdateState> = Mutex::new(ServerUpdateState::Idle);
-    static ref PENDING_RELEASE: Mutex<Option<ResolvedServerRelease>> = Mutex::new(None);
+    static ref LATEST_RELEASE: Mutex<Option<ResolvedServerRelease>> = Mutex::new(None);
+    static ref INSTALLED_RELEASE_TAG: Mutex<Option<String>> = Mutex::new(None);
 }
 
 #[derive(Clone)]
@@ -57,7 +61,7 @@ struct GitHubReleaseAsset {
 
 #[derive(Debug, Clone)]
 struct ResolvedServerRelease {
-    version: String,
+    tag: String,
     url: String,
     sha256: String,
     asset_name: String,
@@ -67,8 +71,7 @@ struct ResolvedServerRelease {
 #[derive(Debug, Clone)]
 pub enum ServerUpdateState {
     Idle,
-    Checking,
-    Available,
+    ResolvingLatest,
     Downloading,
     Installing,
     Failed,
@@ -87,17 +90,13 @@ pub fn initialize(app: AppHandle, variant: Variant, exe_relative: Option<&'stati
     if let Ok(mut slot) = UPDATE_CONTEXT.lock() {
         *slot = Some(context);
     }
+    hydrate_installed_release_tag(&app);
 
     crate::modules::menu::sync_server_update_menu(&app);
 
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(UPDATE_CHECK_DELAY_SECS));
-        start_update_check(app.clone());
-
-        loop {
-            thread::sleep(Duration::from_secs(UPDATE_CHECK_INTERVAL_SECS));
-            start_update_check(app.clone());
-        }
+        start_update_check(app);
     });
 }
 
@@ -113,36 +112,34 @@ pub fn ensure_server_ready(
     if let Ok(mut slot) = UPDATE_CONTEXT.lock() {
         *slot = Some(context.clone());
     }
+    hydrate_installed_release_tag(app);
 
+    set_state(app, ServerUpdateState::ResolvingLatest);
+    let release = fetch_latest_release_with_retry(&context)?;
+    cache_latest_release(release.clone());
     let target_path = resolve_target_path(app, &context)?;
-    if target_path.exists() {
-        println!(
-            "Standalone server already available at {}",
-            target_path.display()
-        );
-        return Ok(());
-    }
+    let installed_tag = cached_installed_tag();
+    let has_managed_binary = target_path.is_file();
 
-    if let Some(dev_path) = local_dev_server_path(&context) {
+    if has_managed_binary && installed_tag.as_deref() == Some(release.tag.as_str()) {
         println!(
-            "Using local development server executable at {}",
-            dev_path.display()
+            "Standalone server already installed at {} and up to date with {}",
+            target_path.display(),
+            release.tag
         );
-        return Ok(());
-    }
-
+    } else {
     println!(
-        "No local standalone server found. Bootstrapping from GitHub releases for {}/{}...",
+        "Preparing standalone server from the latest GitHub release for {}/{}...",
         context.owner, context.repo
     );
     set_state(app, ServerUpdateState::Downloading);
-    let release = fetch_latest_release(&context)?;
     install_release(app, &context, &release, false)?;
-    persist_installed_version(app, &release.version)?;
+    persist_installed_version(app, &release.tag)?;
     println!(
         "Standalone server bootstrap complete. Installed version {}",
-        release.version
+        release.tag
     );
+    }
     set_state(app, ServerUpdateState::Idle);
     Ok(())
 }
@@ -166,20 +163,32 @@ pub fn current_update_state() -> ServerUpdateState {
 }
 
 pub fn tray_menu_descriptor() -> Option<(String, bool)> {
+    if update_context().is_err() {
+        return None;
+    }
+
     match current_update_state() {
-        ServerUpdateState::Idle | ServerUpdateState::Checking => None,
-        ServerUpdateState::Available => {
-            Some(("New version available, update now!".to_string(), true))
+        ServerUpdateState::Idle => Some(idle_tray_descriptor()),
+        ServerUpdateState::ResolvingLatest => {
+            Some(("Resolving latest server release...".to_string(), false))
         }
-        ServerUpdateState::Downloading | ServerUpdateState::Installing => {
-            Some(("Downloading server...".to_string(), false))
+        ServerUpdateState::Downloading => {
+            let version_suffix = display_tag_suffix();
+            Some((format!("Downloading server{version_suffix}..."), false))
         }
-        ServerUpdateState::Failed => Some(("Update failed - Retry".to_string(), true)),
+        ServerUpdateState::Installing => {
+            let version_suffix = display_tag_suffix();
+            Some((format!("Installing server{version_suffix}..."), false))
+        }
+        ServerUpdateState::Failed => {
+            let version_suffix = display_tag_suffix();
+            Some((format!("Retry latest server download{version_suffix}"), true))
+        }
     }
 }
 
 pub fn start_update_check(app: AppHandle) {
-    if !begin_transition_to_checking() {
+    if !begin_transition_to_resolving() {
         return;
     }
 
@@ -192,35 +201,23 @@ pub fn start_update_check(app: AppHandle) {
 }
 
 pub fn start_server_update(app: AppHandle) {
-    let release = match current_update_state() {
-        ServerUpdateState::Available | ServerUpdateState::Failed => {
-            PENDING_RELEASE.lock().ok().and_then(|slot| slot.clone())
-        }
-        _ => None,
-    };
-
-    let Some(release) = release else {
-        return;
-    };
-
     if !begin_transition_to_downloading(&app) {
         return;
     }
 
     thread::spawn(move || {
-        let result =
-            update_context().and_then(|context| install_release(&app, &context, &release, true));
+        let result = update_context().and_then(|context| {
+            set_state(&app, ServerUpdateState::ResolvingLatest);
+            let release = fetch_latest_release_with_retry(&context)?;
+            cache_latest_release(release.clone());
+            set_state(&app, ServerUpdateState::Downloading);
+            install_release(&app, &context, &release, true)?;
+            persist_installed_version(&app, &release.tag)?;
+            Ok(())
+        });
+
         match result {
-            Ok(()) => {
-                if let Err(error) = persist_installed_version(&app, &release.version) {
-                    set_failed_state(&app, error);
-                    return;
-                }
-                if let Ok(mut slot) = PENDING_RELEASE.lock() {
-                    *slot = None;
-                }
-                set_state(&app, ServerUpdateState::Idle);
-            }
+            Ok(()) => set_state(&app, ServerUpdateState::Idle),
             Err(error) => {
                 let _ = crate::app_runtime::start_embedded_server_process(&app);
                 set_failed_state(&app, error);
@@ -231,7 +228,12 @@ pub fn start_server_update(app: AppHandle) {
 
 pub fn handle_tray_action(app: AppHandle) {
     match current_update_state() {
-        ServerUpdateState::Available | ServerUpdateState::Failed => start_server_update(app),
+        ServerUpdateState::Idle => {
+            if has_newer_latest_release() {
+                start_server_update(app);
+            }
+        }
+        ServerUpdateState::Failed => start_server_update(app),
         _ => {}
     }
 }
@@ -261,33 +263,14 @@ fn update_context() -> Result<UpdateContext, String> {
 
 fn run_update_check(app: &AppHandle) -> Result<(), String> {
     let context = update_context()?;
-    let current_version = current_local_version(app);
     println!(
-        "Checking GitHub releases for standalone server updates in {}/{} (current version: {})",
-        context.owner, context.repo, current_version
+        "Resolving latest standalone server release in {}/{}",
+        context.owner, context.repo
     );
-    let release = fetch_latest_release(&context)?;
-
-    if is_remote_version_newer(&release.version, &current_version) {
-        println!(
-            "Standalone server update available: {} -> {}",
-            current_version, release.version
-        );
-        if let Ok(mut slot) = PENDING_RELEASE.lock() {
-            *slot = Some(release);
-        }
-        set_state(app, ServerUpdateState::Available);
-    } else {
-        println!(
-            "Standalone server is up to date at version {}",
-            current_version
-        );
-        if let Ok(mut slot) = PENDING_RELEASE.lock() {
-            *slot = None;
-        }
-        set_state(app, ServerUpdateState::Idle);
-    }
-
+    let release = fetch_latest_release_with_retry(&context)?;
+    println!("Latest standalone server release is {}", release.tag);
+    cache_latest_release(release);
+    set_state(app, ServerUpdateState::Idle);
     Ok(())
 }
 
@@ -306,9 +289,9 @@ fn install_release(
 
     println!(
         "Downloading standalone server version {} from {}",
-        release.version, release.url
+        release.tag, release.url
     );
-    download_release_asset(release, &staged_asset_path)?;
+    download_release_asset_with_retry(release, &staged_asset_path)?;
     println!(
         "Verifying standalone server checksum for {}",
         staged_asset_path.display()
@@ -344,9 +327,15 @@ fn install_release(
 
     println!(
         "Standalone server version {} installed successfully",
-        release.version
+        release.tag
     );
     Ok(())
+}
+
+fn fetch_latest_release_with_retry(context: &UpdateContext) -> Result<ResolvedServerRelease, String> {
+    retry_with_backoff(RELEASE_FETCH_RETRIES, "fetch latest GitHub release metadata", || {
+        fetch_latest_release(context)
+    })
 }
 
 fn fetch_latest_release(context: &UpdateContext) -> Result<ResolvedServerRelease, String> {
@@ -369,6 +358,7 @@ fn fetch_latest_release(context: &UpdateContext) -> Result<ResolvedServerRelease
 
     resolve_release_asset(context, release)
 }
+
 fn resolve_release_asset(
     context: &UpdateContext,
     release: GitHubReleaseResponse,
@@ -381,10 +371,10 @@ fn resolve_release_asset(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| "Failed to resolve server executable name".to_string())?;
-    let version = normalize_release_version(&release.tag_name);
+    let tag = normalize_release_tag(&release.tag_name);
 
-    let assets = release.assets;
-    let asset = assets
+    let asset = release
+        .assets
         .iter()
         .find(|asset| asset_matches(asset))
         .cloned()
@@ -398,11 +388,11 @@ fn resolve_release_asset(
 
     println!(
         "Selected standalone server release {} with asset {}",
-        version, asset.name
+        tag, asset.name
     );
 
     Ok(ResolvedServerRelease {
-        version,
+        tag,
         url: asset.browser_download_url,
         sha256: digest.to_string(),
         asset_name: asset.name,
@@ -419,24 +409,17 @@ fn parse_github_digest(digest: &str) -> Option<&str> {
     digest.strip_prefix("sha256:")
 }
 
-fn normalize_release_version(tag_name: &str) -> String {
-    tag_name
-        .trim()
-        .trim_start_matches('v')
-        .trim_start_matches('V')
-        .to_string()
+fn normalize_release_tag(tag_name: &str) -> String {
+    tag_name.trim().to_string()
 }
 
 fn github_client() -> Result<Client, String> {
     Client::builder()
-        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(GITHUB_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(GITHUB_REQUEST_TIMEOUT_SECS))
         .user_agent(USER_AGENT)
         .build()
         .map_err(|error| error.to_string())
-}
-
-fn current_local_version(app: &AppHandle) -> String {
-    read_persisted_version(app).unwrap_or_else(|| "0.0.0".to_string())
 }
 
 fn read_persisted_version(app: &AppHandle) -> Option<String> {
@@ -457,7 +440,11 @@ fn persist_installed_version(app: &AppHandle, version: &str) -> Result<(), Strin
         installed_version: version.to_string(),
     };
     let json = serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())?;
-    fs::write(path, json).map_err(|error| error.to_string())
+    fs::write(path, json).map_err(|error| error.to_string())?;
+    if let Ok(mut slot) = INSTALLED_RELEASE_TAG.lock() {
+        *slot = Some(version.to_string());
+    }
+    Ok(())
 }
 
 fn persisted_version_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -481,22 +468,13 @@ fn updater_temp_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .join("server-update-temp"))
 }
 
-fn local_dev_server_path(context: &UpdateContext) -> Option<PathBuf> {
-    let path = std::env::current_dir().ok()?.join(context.exe_relative);
-    if is_local_server_exe(&path) {
-        Some(path)
-    } else {
-        None
-    }
-}
-
-fn is_local_server_exe(path: &Path) -> bool {
-    path.is_file()
-        && path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .map(|extension| extension.eq_ignore_ascii_case("exe"))
-            .unwrap_or(false)
+fn download_release_asset_with_retry(
+    release: &ResolvedServerRelease,
+    destination_path: &Path,
+) -> Result<(), String> {
+    retry_with_backoff(RELEASE_DOWNLOAD_RETRIES, "download latest server asset", || {
+        download_release_asset(release, destination_path)
+    })
 }
 
 fn download_release_asset(
@@ -504,18 +482,20 @@ fn download_release_asset(
     destination_path: &Path,
 ) -> Result<(), String> {
     let client = github_client()?;
-
     let mut response = client
         .get(&release.url)
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|error| format!("Failed to download server executable: {error}"))?;
 
+    let partial_path = destination_path.with_extension("part");
+    let _ = fs::remove_file(&partial_path);
+
     if let Some(parent) = destination_path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
-    let mut file = File::create(destination_path).map_err(|error| error.to_string())?;
+    let mut file = File::create(&partial_path).map_err(|error| error.to_string())?;
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let read = response
@@ -527,7 +507,12 @@ fn download_release_asset(
         file.write_all(&buffer[..read])
             .map_err(|error| format!("Failed to write server asset: {error}"))?;
     }
-    file.flush().map_err(|error| error.to_string())
+
+    file.flush().map_err(|error| error.to_string())?;
+    let _ = fs::remove_file(destination_path);
+    fs::rename(&partial_path, destination_path).map_err(|error| {
+        format!("Failed to move downloaded server asset into place: {error}")
+    })
 }
 
 fn extract_7z_archive(
@@ -649,14 +634,14 @@ fn set_state(app: &AppHandle, next_state: ServerUpdateState) {
     crate::modules::menu::sync_server_update_menu(app);
 }
 
-fn begin_transition_to_checking() -> bool {
+fn begin_transition_to_resolving() -> bool {
     if let Ok(mut state) = UPDATE_STATE.lock() {
         match &*state {
             ServerUpdateState::Downloading
             | ServerUpdateState::Installing
-            | ServerUpdateState::Checking => false,
+            | ServerUpdateState::ResolvingLatest => false,
             _ => {
-                *state = ServerUpdateState::Checking;
+                *state = ServerUpdateState::ResolvingLatest;
                 true
             }
         }
@@ -668,7 +653,7 @@ fn begin_transition_to_checking() -> bool {
 fn begin_transition_to_downloading(app: &AppHandle) -> bool {
     let changed = if let Ok(mut state) = UPDATE_STATE.lock() {
         match &*state {
-            ServerUpdateState::Available | ServerUpdateState::Failed => {
+            ServerUpdateState::Idle | ServerUpdateState::Failed => {
                 *state = ServerUpdateState::Downloading;
                 true
             }
@@ -685,36 +670,93 @@ fn begin_transition_to_downloading(app: &AppHandle) -> bool {
     changed
 }
 
-fn is_remote_version_newer(remote: &str, local: &str) -> bool {
-    match (
-        Version::parse(
-            remote
-                .trim_start_matches('v')
-                .trim_start_matches('V')
-                .trim(),
-        ),
-        Version::parse(local.trim_start_matches('v').trim_start_matches('V').trim()),
-    ) {
-        (Ok(remote_version), Ok(local_version)) => remote_version > local_version,
-        _ => remote.trim() != local.trim(),
+fn cache_latest_release(release: ResolvedServerRelease) {
+    if let Ok(mut slot) = LATEST_RELEASE.lock() {
+        *slot = Some(release);
     }
+}
+
+fn idle_tray_descriptor() -> (String, bool) {
+    let installed = cached_installed_tag();
+    let latest = cached_release_tag();
+
+    match (installed, latest) {
+        (Some(installed), Some(latest)) if installed == latest => {
+            (format!("Server {latest}"), false)
+        }
+        (_, Some(latest)) => (format!("Update server to {latest}"), true),
+        (Some(installed), None) => (format!("Server {installed}"), false),
+        (None, None) => ("Server version unknown".to_string(), false),
+    }
+}
+
+fn display_tag_suffix() -> String {
+    cached_release_tag()
+        .or_else(cached_installed_tag)
+        .map(|tag| format!(" ({tag})"))
+        .unwrap_or_default()
+}
+
+fn has_newer_latest_release() -> bool {
+    match (cached_installed_tag(), cached_release_tag()) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(installed), Some(latest)) => installed != latest,
+    }
+}
+
+fn cached_release_tag() -> Option<String> {
+    LATEST_RELEASE
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|release| release.tag.clone()))
+}
+
+fn cached_installed_tag() -> Option<String> {
+    INSTALLED_RELEASE_TAG.lock().ok().and_then(|slot| slot.clone())
+}
+
+fn hydrate_installed_release_tag(app: &AppHandle) {
+    let installed = read_persisted_version(app);
+    if let Ok(mut slot) = INSTALLED_RELEASE_TAG.lock() {
+        *slot = installed;
+    }
+}
+
+fn retry_with_backoff<T, F>(attempts: usize, action: &str, mut operation: F) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
+    let mut last_error = String::new();
+    for attempt in 1..=attempts {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = error;
+                eprintln!(
+                    "Failed to {} (attempt {}/{}): {}",
+                    action, attempt, attempts, last_error
+                );
+                if attempt < attempts {
+                    thread::sleep(Duration::from_secs(RETRY_DELAY_SECS * attempt as u64));
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "Unable to {} after {} attempts: {}",
+        action, attempts, last_error
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        asset_matches, is_remote_version_newer, normalize_release_version, GitHubReleaseAsset,
-    };
+    use super::{asset_matches, normalize_release_tag, GitHubReleaseAsset};
 
     #[test]
-    fn semver_comparison_prefers_newer_remote() {
-        assert!(is_remote_version_newer("v1.2.0", "1.1.9"));
-        assert!(!is_remote_version_newer("1.2.0", "v1.2.0"));
-    }
-
-    #[test]
-    fn normalizes_v_prefix() {
-        assert_eq!(normalize_release_version("v1.0.0"), "1.0.0");
+    fn preserves_release_tag() {
+        assert_eq!(normalize_release_tag("v1.0.0"), "v1.0.0");
     }
 
     #[test]
