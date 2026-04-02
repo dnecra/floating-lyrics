@@ -1,9 +1,11 @@
+use std::time::Duration;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
 use tauri_plugin_opener::OpenerExt;
 
+use crate::app_runtime::Variant;
 use crate::modules::mode::{self, WindowMode};
 use crate::modules::scripts;
 use crate::modules::settings::*;
@@ -56,6 +58,44 @@ fn local_ipv4_menu_text() -> String {
     format!("{}:1312", detect_local_ipv4())
 }
 
+fn reachable_http_url(url: &'static str) -> bool {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()
+        .and_then(|client| client.get(url).send())
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
+}
+
+fn serverless_base_url() -> &'static str {
+    const PRIMARY: &str = "http://192.168.99.47";
+    const FALLBACK: &str = "http://192.168.0.101";
+
+    if reachable_http_url(PRIMARY) {
+        PRIMARY
+    } else if reachable_http_url(FALLBACK) {
+        FALLBACK
+    } else {
+        PRIMARY
+    }
+}
+
+fn tray_browser_url() -> String {
+    match crate::app_runtime::current_variant() {
+        Some(Variant::Serverless) => format!("{}/lyrics", serverless_base_url()),
+        _ => local_ipv4_url(),
+    }
+}
+
+fn tray_browser_menu_text() -> String {
+    match crate::app_runtime::current_variant() {
+        Some(Variant::Serverless) => {
+            serverless_base_url().trim_start_matches("http://").to_string() + "/lyrics"
+        }
+        _ => local_ipv4_menu_text(),
+    }
+}
+
 pub fn refresh_menu_labels() {
     if !normal_mode_only_controls_enabled() {
         return;
@@ -93,7 +133,7 @@ pub fn update_color_menu_labels(app: &tauri::AppHandle) {
 
         if let Some(item) = menu.get("local_ipv4") {
             if let Some(menu_item) = item.as_menuitem() {
-                let _ = menu_item.set_text(local_ipv4_menu_text());
+                let _ = menu_item.set_text(tray_browser_menu_text());
             }
         }
 
@@ -187,7 +227,7 @@ pub fn build_menu_items(
     let local_ipv4_item = MenuItem::with_id(
         app,
         "local_ipv4",
-        local_ipv4_menu_text(),
+        tray_browser_menu_text(),
         true,
         None::<&str>,
     )?;
@@ -329,7 +369,7 @@ pub fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
     }
 
     if event_id == "local_ipv4" {
-        let _ = app.opener().open_url(local_ipv4_url(), None::<&str>);
+        let _ = app.opener().open_url(tray_browser_url(), None::<&str>);
         return;
     }
 

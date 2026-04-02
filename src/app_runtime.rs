@@ -63,6 +63,7 @@ lazy_static::lazy_static! {
     static ref EMBEDDED_SERVER_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
     #[cfg(target_os = "windows")]
     static ref SERVER_JOB: Mutex<Option<isize>> = Mutex::new(None);
+    static ref RUNTIME_VARIANT: Mutex<Option<Variant>> = Mutex::new(None);
     static ref RUNTIME_ENDPOINT: Mutex<Option<RuntimeEndpoint>> = Mutex::new(None);
     static ref RUNTIME_EMBEDDED_EXE: Mutex<Option<&'static str>> = Mutex::new(None);
 }
@@ -160,6 +161,9 @@ pub fn run(variant: Variant) {
             port: cfg.port,
             lyrics_path: cfg.lyrics_path,
         });
+    }
+    if let Ok(mut slot) = RUNTIME_VARIANT.lock() {
+        *slot = Some(variant);
     }
     if let Ok(mut slot) = RUNTIME_EMBEDDED_EXE.lock() {
         *slot = cfg.embedded_exe;
@@ -310,7 +314,16 @@ pub fn open_welcome_in_main_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(mode::NORMAL_WINDOW_LABEL) else {
         return;
     };
-    let url = format!("http://{}:{}{}", LOCAL_HOST, LOCAL_PORT, LOCAL_WELCOME_PATH);
+    let url = current_runtime_endpoint()
+        .and_then(|endpoint| {
+            network::get_working_url(
+                endpoint.primary_ip,
+                endpoint.fallback_ip,
+                endpoint.port,
+                LOCAL_WELCOME_PATH,
+            )
+        })
+        .unwrap_or_else(|| format!("http://{}:{}{}", LOCAL_HOST, LOCAL_PORT, LOCAL_WELCOME_PATH));
     window::enter_welcome_mode(&window);
     let _ = window.navigate(url.parse().expect("valid URL"));
     window::animate_show_and_focus(&window);
@@ -489,6 +502,10 @@ pub fn start_embedded_server_process(app: &tauri::AppHandle) -> Result<(), Strin
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 pub fn is_welcome_url(url: &str) -> bool {
     url.contains("/welcome") || url.contains("/guide")
+}
+
+pub fn current_variant() -> Option<Variant> {
+    RUNTIME_VARIANT.lock().ok().and_then(|slot| *slot)
 }
 
 fn is_windows_startup_launch() -> bool {
