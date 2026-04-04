@@ -135,6 +135,7 @@ fn apply_connected_window_state(
         crate::modules::mode::WindowMode::Normal => {
             let _ = win.eval(scripts.transparent_bg_script);
             let _ = win.eval(scripts.layout_hover_script);
+            let _ = win.eval(scripts.close_window_script);
             let _ = win.eval(
                 "if (window.__pushLayoutHoverBounds) { try { window.__pushLayoutHoverBounds(); } catch (_) {} }",
             );

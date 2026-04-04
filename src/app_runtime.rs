@@ -29,6 +29,7 @@ const SERVERLESS_LYRICS_PATH: &str = "/lyrics";
 const LOCAL_HOST: &str = "127.0.0.1";
 const LOCAL_PORT: u16 = 1312;
 const LOCAL_LYRICS_PATH: &str = "/lyrics";
+const LOCAL_WELCOME_PATH: &str = "/welcome";
 
 // â”€â”€ Embedded executable paths (relative to resource dir) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const STANDALONE_EXE_RELATIVE: &str = "source/lyrics-smtc-x64.exe";
@@ -36,6 +37,7 @@ const STANDALONE_EXE_RELATIVE: &str = "source/lyrics-smtc-x64.exe";
 // â”€â”€ Scripts bundled at compile time â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const TRANSPARENT_BG_SCRIPT: &str = include_str!("../scripts/transparent-bg.js");
 const LAYOUT_HOVER_SCRIPT: &str = include_str!("../scripts/layout-hover-bounds.js");
+const CLOSE_WINDOW_SCRIPT: &str = include_str!("../scripts/close-window-control.js");
 const WINDOW_MODE_INIT_SCRIPT: &str = r#"
     (() => {
         const key = 'lyricsSettings';
@@ -48,6 +50,7 @@ const WINDOW_MODE_INIT_SCRIPT: &str = r#"
 static SCRIPTS: scripts::Scripts = scripts::Scripts {
     transparent_bg_script: TRANSPARENT_BG_SCRIPT,
     layout_hover_script: LAYOUT_HOVER_SCRIPT,
+    close_window_script: CLOSE_WINDOW_SCRIPT,
 };
 
 const STARTUP_INJECTION_PASSES: u32 = 8;
@@ -238,6 +241,7 @@ pub fn run(variant: Variant) {
             commands::start_window_mode_dragging,
             commands::log_hover_probe,
             commands::get_window_mode_chrome_state,
+            commands::close_app,
         ])
         .setup(move |app| {
             // Build tray menu early so bootstrap download state is visible immediately.
@@ -289,6 +293,32 @@ pub fn run(variant: Variant) {
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Public helpers called from menu / other modules
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+pub fn open_welcome_in_main_window(app: &tauri::AppHandle) {
+    STARTUP_SHOW_REQUESTED.store(true, Ordering::SeqCst);
+    if !STARTUP_COMPLETE.load(Ordering::SeqCst) {
+        return;
+    }
+    if mode::current_mode() != WindowMode::Normal {
+        switch_window_mode(app, WindowMode::Normal);
+    }
+    let Some(window) = app.get_webview_window(mode::NORMAL_WINDOW_LABEL) else {
+        return;
+    };
+    let url = current_runtime_endpoint()
+        .and_then(|endpoint| {
+            network::get_working_url(
+                endpoint.primary_ip,
+                endpoint.fallback_ip,
+                endpoint.port,
+                LOCAL_WELCOME_PATH,
+            )
+        })
+        .unwrap_or_else(|| format!("http://{}:{}{}", LOCAL_HOST, LOCAL_PORT, LOCAL_WELCOME_PATH));
+    window::enter_welcome_mode(&window);
+    let _ = window.navigate(url.parse().expect("valid URL"));
+    window::animate_show_and_focus(&window);
+}
 
 fn prepare_runtime_server(
     app: &tauri::AppHandle,
@@ -407,6 +437,10 @@ pub fn restart_app(app: &tauri::AppHandle) {
     stop_embedded_server();
     lock::release_app_lock();
     app.restart();
+}
+
+pub fn mark_app_exiting() {
+    APP_EXITING.store(true, Ordering::SeqCst);
 }
 
 pub fn stop_embedded_server_process() {

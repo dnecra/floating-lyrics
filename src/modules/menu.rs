@@ -4,7 +4,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
 use tauri_plugin_opener::OpenerExt;
-
 use crate::app_runtime::Variant;
 use crate::modules::mode::{self, WindowMode};
 use crate::modules::scripts;
@@ -85,10 +84,6 @@ fn tray_browser_url() -> String {
         Some(Variant::Serverless) => format!("{}/lyrics", serverless_base_url()),
         _ => local_ipv4_url(),
     }
-}
-
-fn tray_guide_url() -> String {
-    "http://localhost:1312/welcome".to_string()
 }
 
 fn tray_browser_menu_text() -> String {
@@ -368,7 +363,7 @@ pub fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
     }
 
     if event_id == "open_guide" {
-        let _ = app.opener().open_url(tray_guide_url(), None::<&str>);
+        crate::app_runtime::open_welcome_in_main_window(app);
         return;
     }
 

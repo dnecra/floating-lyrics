@@ -107,6 +107,7 @@ pub fn apply_settings_to_window(
                 let _ = window.set_focusable(!settings.click_through_enabled);
             }
             let _ = window.eval(scripts.layout_hover_script);
+            let _ = window.eval(scripts.close_window_script);
         }
         WindowMode::Window => {
             let _ = window.set_ignore_cursor_events(false);
