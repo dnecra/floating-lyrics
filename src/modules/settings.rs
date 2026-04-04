@@ -194,10 +194,6 @@ pub fn save_settings_for_mode(app: &tauri::AppHandle, settings: &AppSettings, mo
     }
 }
 
-pub fn save_settings(app: &tauri::AppHandle, settings: &AppSettings) {
-    save_settings_for_mode(app, settings, current_mode());
-}
-
 pub fn save_window_mode_bounds(app: &tauri::AppHandle, x: i32, y: i32, width: u32, height: u32) {
     let mut settings = load_settings_for_mode(app, WindowMode::Window);
     settings.window_mode_x = Some(x);

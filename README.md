@@ -25,7 +25,7 @@ This repo is built with Rust + Tauri 2 and is designed around two runtime modes:
 The standalone build is the default desktop app variant.
 
 - Connects to `http://127.0.0.1:1312/lyrics`
-- Can open a local welcome/guide page
+- Tray guide shortcut opens `http://localhost:1312/welcome` in the browser
 - Downloads and manages the bundled lyrics server executable automatically
 - Checks the latest server release from `dnecra/lyrics-server`
 
@@ -137,7 +137,6 @@ Tracked settings include:
 - hover-hide preference
 - animation toggle
 - blur toggle
-- welcome screen state
 - mini-window bounds
 
 ## Repo Layout

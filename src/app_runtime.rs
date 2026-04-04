@@ -29,7 +29,6 @@ const SERVERLESS_LYRICS_PATH: &str = "/lyrics";
 const LOCAL_HOST: &str = "127.0.0.1";
 const LOCAL_PORT: u16 = 1312;
 const LOCAL_LYRICS_PATH: &str = "/lyrics";
-const LOCAL_WELCOME_PATH: &str = "/welcome";
 
 // â”€â”€ Embedded executable paths (relative to resource dir) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const STANDALONE_EXE_RELATIVE: &str = "source/lyrics-smtc-x64.exe";
@@ -37,7 +36,6 @@ const STANDALONE_EXE_RELATIVE: &str = "source/lyrics-smtc-x64.exe";
 // â”€â”€ Scripts bundled at compile time â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const TRANSPARENT_BG_SCRIPT: &str = include_str!("../scripts/transparent-bg.js");
 const LAYOUT_HOVER_SCRIPT: &str = include_str!("../scripts/layout-hover-bounds.js");
-const CLOSE_WINDOW_SCRIPT: &str = include_str!("../scripts/close-window-control.js");
 const WINDOW_MODE_INIT_SCRIPT: &str = r#"
     (() => {
         const key = 'lyricsSettings';
@@ -50,11 +48,9 @@ const WINDOW_MODE_INIT_SCRIPT: &str = r#"
 static SCRIPTS: scripts::Scripts = scripts::Scripts {
     transparent_bg_script: TRANSPARENT_BG_SCRIPT,
     layout_hover_script: LAYOUT_HOVER_SCRIPT,
-    close_window_script: CLOSE_WINDOW_SCRIPT,
 };
 
 const STARTUP_INJECTION_PASSES: u32 = 8;
-const WINDOWS_STARTUP_ARG: &str = "--windows-startup";
 const SERVER_READY_TIMEOUT_SECS: u64 = 30;
 const SERVER_READY_POLL_MS: u64 = 250;
 
@@ -90,8 +86,6 @@ struct RuntimeConfig {
     lyrics_path: &'static str,
     /// Whether this variant ships an embedded server exe.
     embedded_exe: Option<&'static str>,
-    /// Whether this variant supports a /welcome page (served by the local server).
-    has_welcome: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -112,7 +106,6 @@ impl RuntimeConfig {
                 lyrics_path: SERVERLESS_LYRICS_PATH,
                 embedded_exe: None,
                 // Serverless has no local server â†’ no /welcome endpoint.
-                has_welcome: false,
             },
             Variant::Standalone => Self {
                 primary_ip: LOCAL_HOST,
@@ -120,7 +113,6 @@ impl RuntimeConfig {
                 port: LOCAL_PORT,
                 lyrics_path: LOCAL_LYRICS_PATH,
                 embedded_exe: Some(STANDALONE_EXE_RELATIVE),
-                has_welcome: true,
             },
         }
     }
@@ -131,7 +123,6 @@ impl RuntimeConfig {
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 pub fn run(variant: Variant) {
     let cfg = RuntimeConfig::for_variant(variant);
-    let launched_via_windows_startup = is_windows_startup_launch();
 
     if !lock::acquire_app_lock() {
         eprintln!("Another instance of Floating Lyrics is already running. Exiting.");
@@ -247,7 +238,6 @@ pub fn run(variant: Variant) {
             commands::start_window_mode_dragging,
             commands::log_hover_probe,
             commands::get_window_mode_chrome_state,
-            commands::close_app,
         ])
         .setup(move |app| {
             // Build tray menu early so bootstrap download state is visible immediately.
@@ -283,9 +273,7 @@ pub fn run(variant: Variant) {
 
                 let app_for_finish = app_handle.clone();
                 let _ = app_handle.run_on_main_thread(move || {
-                    if let Err(error) =
-                        complete_startup(&app_for_finish, cfg, launched_via_windows_startup)
-                    {
+                    if let Err(error) = complete_startup(&app_for_finish, cfg) {
                         eprintln!("Failed to finalize app startup: {error}");
                     }
                 });
@@ -301,33 +289,6 @@ pub fn run(variant: Variant) {
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Public helpers called from menu / other modules
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/// Open the /welcome page in the existing main window (called from tray "Open Guide").
-pub fn open_welcome_in_main_window(app: &tauri::AppHandle) {
-    STARTUP_SHOW_REQUESTED.store(true, Ordering::SeqCst);
-    if !STARTUP_COMPLETE.load(Ordering::SeqCst) {
-        return;
-    }
-    if mode::current_mode() != WindowMode::Normal {
-        switch_window_mode(app, WindowMode::Normal);
-    }
-    let Some(window) = app.get_webview_window(mode::NORMAL_WINDOW_LABEL) else {
-        return;
-    };
-    let url = current_runtime_endpoint()
-        .and_then(|endpoint| {
-            network::get_working_url(
-                endpoint.primary_ip,
-                endpoint.fallback_ip,
-                endpoint.port,
-                LOCAL_WELCOME_PATH,
-            )
-        })
-        .unwrap_or_else(|| format!("http://{}:{}{}", LOCAL_HOST, LOCAL_PORT, LOCAL_WELCOME_PATH));
-    window::enter_welcome_mode(&window);
-    let _ = window.navigate(url.parse().expect("valid URL"));
-    window::animate_show_and_focus(&window);
-}
 
 fn prepare_runtime_server(
     app: &tauri::AppHandle,
@@ -359,11 +320,7 @@ fn prepare_runtime_server(
     Ok(())
 }
 
-fn complete_startup(
-    app: &tauri::AppHandle,
-    cfg: RuntimeConfig,
-    launched_via_windows_startup: bool,
-) -> tauri::Result<()> {
+fn complete_startup(app: &tauri::AppHandle, cfg: RuntimeConfig) -> tauri::Result<()> {
     let window = ensure_main_window(app)?;
 
     mode::set_current_mode(WindowMode::Normal);
@@ -381,13 +338,6 @@ fn complete_startup(
         Ordering::SeqCst,
     );
 
-    let show_welcome =
-        cfg.has_welcome && !launched_via_windows_startup && !loaded_settings.has_seen_welcome;
-    if show_welcome {
-        loaded_settings.has_seen_welcome = true;
-        settings::save_settings(app, &loaded_settings);
-    }
-
     loaded_settings.click_through_enabled = true;
     settings::apply_loaded_settings(&loaded_settings);
 
@@ -396,42 +346,22 @@ fn complete_startup(
     window::setup_window_events(&window);
     let _ = ensure_window_mode_window(app);
 
-    let startup_path = if show_welcome {
-        LOCAL_WELCOME_PATH
-    } else {
-        cfg.lyrics_path
-    };
     let initial_url =
-        network::get_working_url(cfg.primary_ip, cfg.fallback_ip, cfg.port, startup_path);
-    let initial_lyrics_url = if show_welcome {
-        None
-    } else {
-        initial_url.clone()
-    };
+        network::get_working_url(cfg.primary_ip, cfg.fallback_ip, cfg.port, cfg.lyrics_path);
+    let initial_lyrics_url = initial_url.clone();
     if let Some(url) = initial_url.as_ref() {
         let _ = window.navigate(url.parse().expect("valid URL"));
         let _ = window.eval(TRANSPARENT_BG_SCRIPT);
-        if !show_welcome {
-            scripts::inject_scripts_rapidly(
-                window.clone(),
-                &SCRIPTS,
-                STARTUP_INJECTION_PASSES,
-                WindowMode::Normal,
-            );
-        }
-    }
-
-    if show_welcome {
-        window::WELCOME_MODE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+        scripts::inject_scripts_rapidly(
+            window.clone(),
+            &SCRIPTS,
+            STARTUP_INJECTION_PASSES,
+            WindowMode::Normal,
+        );
     }
 
     window::apply_settings(app, &loaded_settings, &SCRIPTS);
-
-    if show_welcome {
-        window::enter_welcome_mode(&window);
-    } else {
-        window::exit_welcome_mode(&window);
-    }
+    window::exit_welcome_mode(&window);
 
     network::start_connectivity_monitor(
         app.clone(),
@@ -479,10 +409,6 @@ pub fn restart_app(app: &tauri::AppHandle) {
     app.restart();
 }
 
-pub fn mark_app_exiting() {
-    APP_EXITING.store(true, Ordering::SeqCst);
-}
-
 pub fn stop_embedded_server_process() {
     stop_embedded_server();
 }
@@ -506,10 +432,6 @@ pub fn is_welcome_url(url: &str) -> bool {
 
 pub fn current_variant() -> Option<Variant> {
     RUNTIME_VARIANT.lock().ok().and_then(|slot| *slot)
-}
-
-fn is_windows_startup_launch() -> bool {
-    std::env::args().any(|arg| arg.eq_ignore_ascii_case(WINDOWS_STARTUP_ARG))
 }
 
 fn current_runtime_endpoint() -> Option<RuntimeEndpoint> {

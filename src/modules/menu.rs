@@ -87,6 +87,10 @@ fn tray_browser_url() -> String {
     }
 }
 
+fn tray_guide_url() -> String {
+    "http://localhost:1312/welcome".to_string()
+}
+
 fn tray_browser_menu_text() -> String {
     match crate::app_runtime::current_variant() {
         Some(Variant::Serverless) => {
@@ -364,7 +368,7 @@ pub fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
     }
 
     if event_id == "open_guide" {
-        crate::app_runtime::open_welcome_in_main_window(app);
+        let _ = app.opener().open_url(tray_guide_url(), None::<&str>);
         return;
     }
 

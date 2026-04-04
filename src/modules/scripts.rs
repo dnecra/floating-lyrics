@@ -11,7 +11,6 @@ const WINDOW_MODE_CHROME_SCRIPT: &str = include_str!("../../scripts/window-mode-
 pub struct Scripts {
     pub transparent_bg_script: &'static str,
     pub layout_hover_script: &'static str,
-    pub close_window_script: &'static str,
 }
 
 pub fn apply_blur_enabled(window: &tauri::WebviewWindow, enabled: bool) {
@@ -100,7 +99,6 @@ pub fn inject_scripts_rapidly(
             WindowMode::Normal => {
                 let _ = window.eval(scripts.transparent_bg_script);
                 let _ = window.eval(scripts.layout_hover_script);
-                let _ = window.eval(scripts.close_window_script);
             }
             WindowMode::Window => {
                 let _ = window.eval(WINDOW_MODE_CHROME_SCRIPT);

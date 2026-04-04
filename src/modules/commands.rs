@@ -103,15 +103,6 @@ pub fn start_window_mode_dragging(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-pub fn close_app(app: tauri::AppHandle) {
-    crate::app_runtime::mark_app_exiting();
-    if let Some(window) = mode::active_window(&app) {
-        crate::modules::window::animate_hide(&window);
-    }
-    app.exit(0);
-}
-
-#[tauri::command]
 pub fn log_hover_probe(source: String, event: String, x: f64, y: f64, target: String) {
     println!(
         "[hover-probe] source={} event={} x={:.1} y={:.1} target={}",

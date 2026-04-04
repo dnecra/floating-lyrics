@@ -96,29 +96,9 @@ fn force_show_width_control(window: &tauri::WebviewWindow) {
                     opacity: 1 !important;
                     pointer-events: auto !important;
                 }
-                #close-window-control,
-                .close-window-control,
-                [id*="close-window-control"],
-                [class*="close-window-control"] {
-                    display: inline-flex !important;
-                    visibility: visible !important;
-                    opacity: 1 !important;
-                    pointer-events: auto !important;
-                }
-                #close-window-btn,
-                .close-window-btn,
-                [id*="close-window-btn"],
-                [class*="close-window-btn"] {
-                    display: inline-flex !important;
-                    visibility: visible !important;
-                    opacity: 1 !important;
-                    pointer-events: auto !important;
-                }
             `;
             const wc = document.getElementById('lyrics-width-control');
             if (wc) wc.classList.add('show');
-            const cc = document.getElementById('close-window-control');
-            if (cc) { cc.classList.add('show'); cc.setAttribute('aria-hidden', 'false'); }
         })();"#,
     );
 }
@@ -131,8 +111,6 @@ fn force_hide_width_control(window: &tauri::WebviewWindow) {
             if (style && style.parentNode) { style.parentNode.removeChild(style); }
             const wc = document.getElementById('lyrics-width-control');
             if (wc) wc.classList.remove('show');
-            const cc = document.getElementById('close-window-control');
-            if (cc) { cc.classList.remove('show'); cc.setAttribute('aria-hidden', 'true'); }
         })();"#,
     );
 }
