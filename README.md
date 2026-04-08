@@ -2,9 +2,10 @@
 
 Windows desktop app for showing synced lyrics in a transparent, always-on-top floating window.
 
-This repo is built with Rust + Tauri 2 and is designed around two runtime modes:
+This repo is built with Rust + Tauri 2 and is designed around three runtime modes:
 
 - `standalone`: runs against a local embedded lyrics server on `127.0.0.1:1312`
+- `ytm`: runs against a local embedded YTM server on `127.0.0.1:1312`
 - `serverless`: connects to a remote lyrics endpoint and exposes a small local control API on `127.0.0.1:32145`
 
 ## Features
@@ -27,6 +28,15 @@ The standalone build is the default desktop app variant.
 - Connects to `http://127.0.0.1:1312/lyrics`
 - Tray guide shortcut opens `http://localhost:1312/welcome` in the browser
 - Downloads and manages the bundled lyrics server executable automatically
+- Checks the latest server release from `dnecra/lyrics-server`
+
+### YTM
+
+The `ytm` build behaves like standalone, but targets the YTM executable on the same GitHub release.
+
+- Connects to `http://127.0.0.1:1312/lyrics`
+- Downloads and manages `lyrics-ytm-x64.exe` directly from the latest release assets
+- Uses the product name `Floating Lyrics YTM`
 - Checks the latest server release from `dnecra/lyrics-server`
 
 ### Serverless
@@ -57,12 +67,18 @@ This project is Windows-oriented. For local development and packaging, install:
 
 ## Development
 
-The repo uses `tauri.cmd` to switch the active entrypoint by copying either `src/standalone.rs` or `src/serverless.rs` into `src/main.rs` before running Tauri commands.
+The repo uses `tauri.cmd` to switch the active entrypoint by copying one of `src/standalone.rs`, `src/ytm.rs`, or `src/serverless.rs` into `src/main.rs` before running Tauri commands.
 
 ### Run standalone
 
 ```bat
 tauri.cmd dev standalone
+```
+
+### Run ytm
+
+```bat
+tauri.cmd dev ytm
 ```
 
 ### Run serverless
@@ -75,6 +91,7 @@ tauri.cmd dev serverless
 
 ```bat
 tauri.cmd dev-watch standalone
+tauri.cmd dev-watch ytm
 tauri.cmd dev-watch serverless
 ```
 
@@ -98,6 +115,7 @@ tauri.cmd build standalone x64
 
 ```bat
 tauri.cmd build standalone x64
+tauri.cmd build ytm x64
 tauri.cmd build serverless x64
 tauri.cmd build all x64
 ```
@@ -153,3 +171,4 @@ Tracked settings include:
 - The app is tuned primarily for Windows behavior.
 - `src/main.rs` is generated/swapped by `tauri.cmd`; avoid treating it as the canonical source of truth.
 - The standalone updater expects a `.7z` asset with a GitHub-provided `sha256:` digest on the latest release.
+- The `ytm` updater expects a `lyrics-ytm-x64.exe` asset with a GitHub-provided `sha256:` digest on the latest release.

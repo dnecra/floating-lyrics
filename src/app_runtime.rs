@@ -33,6 +33,7 @@ const LOCAL_WELCOME_PATH: &str = "/welcome";
 
 // â”€â”€ Embedded executable paths (relative to resource dir) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const STANDALONE_EXE_RELATIVE: &str = "source/lyrics-smtc-x64.exe";
+const YTM_EXE_RELATIVE: &str = "source/lyrics-ytm-x64.exe";
 
 // â”€â”€ Scripts bundled at compile time â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const TRANSPARENT_BG_SCRIPT: &str = include_str!("../scripts/transparent-bg.js");
@@ -52,6 +53,7 @@ static SCRIPTS: scripts::Scripts = scripts::Scripts {
     layout_hover_script: LAYOUT_HOVER_SCRIPT,
     close_window_script: CLOSE_WINDOW_SCRIPT,
 };
+const WELCOME_WINDOW_SCRIPT: &str = include_str!("../scripts/welcome-window-control.js");
 
 const STARTUP_INJECTION_PASSES: u32 = 8;
 const SERVER_READY_TIMEOUT_SECS: u64 = 30;
@@ -70,6 +72,10 @@ lazy_static::lazy_static! {
 static APP_EXITING: AtomicBool = AtomicBool::new(false);
 static STARTUP_COMPLETE: AtomicBool = AtomicBool::new(false);
 static STARTUP_SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
+static WELCOME_WINDOW_ACTIVE: AtomicBool = AtomicBool::new(false);
+static WELCOME_CLOSE_ALLOWED: AtomicBool = AtomicBool::new(false);
+static WELCOME_SHOW_PENDING: AtomicBool = AtomicBool::new(false);
+static WELCOME_RESTORE_NORMAL_PAUSED: AtomicBool = AtomicBool::new(false);
 
 // â”€â”€ App variant â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 #[allow(dead_code)]
@@ -77,6 +83,7 @@ static STARTUP_SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub enum Variant {
     Serverless,
     Standalone,
+    Ytm,
 }
 
 // â”€â”€ Per-variant runtime config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -117,8 +124,28 @@ impl RuntimeConfig {
                 lyrics_path: LOCAL_LYRICS_PATH,
                 embedded_exe: Some(STANDALONE_EXE_RELATIVE),
             },
+            Variant::Ytm => Self {
+                primary_ip: LOCAL_HOST,
+                fallback_ip: None,
+                port: LOCAL_PORT,
+                lyrics_path: LOCAL_LYRICS_PATH,
+                embedded_exe: Some(YTM_EXE_RELATIVE),
+            },
         }
     }
+}
+
+fn variant_display_name(variant: Variant) -> &'static str {
+    match variant {
+        Variant::Ytm => "Floating Lyrics YTM",
+        Variant::Serverless | Variant::Standalone => "Floating Lyrics",
+    }
+}
+
+fn runtime_display_name() -> &'static str {
+    current_variant()
+        .map(variant_display_name)
+        .unwrap_or("Floating Lyrics")
 }
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -128,7 +155,10 @@ pub fn run(variant: Variant) {
     let cfg = RuntimeConfig::for_variant(variant);
 
     if !lock::acquire_app_lock() {
-        eprintln!("Another instance of Floating Lyrics is already running. Exiting.");
+        eprintln!(
+            "Another instance of {} is already running. Exiting.",
+            variant_display_name(variant)
+        );
         std::process::exit(0);
     }
 
@@ -172,7 +202,10 @@ pub fn run(variant: Variant) {
                 return;
             }
             let label = webview.label().to_string();
-            if label != mode::NORMAL_WINDOW_LABEL && label != mode::WINDOW_MODE_LABEL {
+            if label != mode::NORMAL_WINDOW_LABEL
+                && label != mode::WINDOW_MODE_LABEL
+                && label != mode::GUIDE_WINDOW_LABEL
+            {
                 return;
             }
             let url = payload.url().to_string();
@@ -217,6 +250,16 @@ pub fn run(variant: Variant) {
                         });
                     }
                 }
+            } else if label == mode::GUIDE_WINDOW_LABEL {
+                let _ = webview.eval(WELCOME_WINDOW_SCRIPT);
+                if WELCOME_SHOW_PENDING.swap(false, Ordering::SeqCst) {
+                    if let Some(window) = webview
+                        .app_handle()
+                        .get_webview_window(mode::GUIDE_WINDOW_LABEL)
+                    {
+                        window::show_and_focus_immediate(&window);
+                    }
+                }
             } else if !is_welcome_url(&url) {
                 let window = webview
                     .app_handle()
@@ -241,6 +284,7 @@ pub fn run(variant: Variant) {
             commands::start_window_mode_dragging,
             commands::log_hover_probe,
             commands::get_window_mode_chrome_state,
+            commands::close_welcome_window,
             commands::close_app,
         ])
         .setup(move |app| {
@@ -259,7 +303,7 @@ pub fn run(variant: Variant) {
                         .expect("default window icon")
                         .clone(),
                 )
-                .tooltip("Floating Lyrics")
+                .tooltip(runtime_display_name())
                 .menu(&tray_menu)
                 .on_tray_icon_event(|_tray, _event| {})
                 .on_menu_event(move |app, event| {
@@ -299,25 +343,31 @@ pub fn open_welcome_in_main_window(app: &tauri::AppHandle) {
     if !STARTUP_COMPLETE.load(Ordering::SeqCst) {
         return;
     }
-    if mode::current_mode() != WindowMode::Normal {
-        switch_window_mode(app, WindowMode::Normal);
+    if !matches!(
+        current_variant(),
+        Some(Variant::Standalone | Variant::Ytm)
+    ) {
+        return;
     }
-    let Some(window) = app.get_webview_window(mode::NORMAL_WINDOW_LABEL) else {
+    let Some(window) = ensure_welcome_window(app).ok() else {
         return;
     };
-    let url = current_runtime_endpoint()
-        .and_then(|endpoint| {
-            network::get_working_url(
-                endpoint.primary_ip,
-                endpoint.fallback_ip,
-                endpoint.port,
-                LOCAL_WELCOME_PATH,
-            )
-        })
-        .unwrap_or_else(|| format!("http://{}:{}{}", LOCAL_HOST, LOCAL_PORT, LOCAL_WELCOME_PATH));
-    window::enter_welcome_mode(&window);
+
+    WELCOME_CLOSE_ALLOWED.store(false, Ordering::SeqCst);
+    WELCOME_WINDOW_ACTIVE.store(true, Ordering::SeqCst);
+    WELCOME_SHOW_PENDING.store(true, Ordering::SeqCst);
+    WELCOME_RESTORE_NORMAL_PAUSED.store(
+        settings::lyrics_paused_for_mode(WindowMode::Normal),
+        Ordering::SeqCst,
+    );
+
+    pause_normal_window_for_welcome(app);
+    let url = current_welcome_url();
+    let _ = window.set_ignore_cursor_events(false);
+    let _ = window.set_focusable(true);
     let _ = window.navigate(url.parse().expect("valid URL"));
-    window::animate_show_and_focus(&window);
+    apply_welcome_window_layout(app, &window);
+    let _ = window.hide();
 }
 
 fn prepare_runtime_server(
@@ -325,7 +375,7 @@ fn prepare_runtime_server(
     variant: Variant,
     cfg: RuntimeConfig,
 ) -> Result<(), String> {
-    if variant != Variant::Standalone {
+    if !matches!(variant, Variant::Standalone | Variant::Ytm) {
         return Ok(());
     }
 
@@ -341,7 +391,7 @@ fn prepare_runtime_server(
             Duration::from_secs(SERVER_READY_TIMEOUT_SECS),
         ) {
             return Err(format!(
-                "Standalone server did not become ready at {}:{}{} within {} seconds",
+                "Embedded server did not become ready at {}:{}{} within {} seconds",
                 cfg.primary_ip, cfg.port, cfg.lyrics_path, SERVER_READY_TIMEOUT_SECS
             ));
         }
@@ -409,7 +459,16 @@ fn complete_startup(app: &tauri::AppHandle, cfg: RuntimeConfig) -> tauri::Result
 
     menu::update_color_menu_labels(app);
     STARTUP_COMPLETE.store(true, Ordering::SeqCst);
+    let should_show_welcome = matches!(
+        current_variant(),
+        Some(Variant::Standalone | Variant::Ytm)
+    )
+        && (STARTUP_SHOW_REQUESTED.swap(false, Ordering::SeqCst)
+            || !loaded_settings.has_seen_welcome);
     show_main_window(app);
+    if should_show_welcome {
+        open_welcome_in_main_window(app);
+    }
     window::apply_always_on_top_preference(&window);
 
     Ok(())
@@ -425,9 +484,7 @@ fn show_main_window(app: &tauri::AppHandle) {
         return;
     };
 
-    if STARTUP_SHOW_REQUESTED.swap(false, Ordering::SeqCst)
-        || !window.is_visible().unwrap_or(false)
-    {
+    if !window.is_visible().unwrap_or(false) {
         window::show_and_focus_immediate(&window);
         window::apply_always_on_top_preference(&window);
     }
@@ -541,7 +598,7 @@ fn ensure_window_mode_window(app: &tauri::AppHandle) -> tauri::Result<tauri::Web
         mode::WINDOW_MODE_LABEL,
         WebviewUrl::App("index.html".into()),
     )
-    .title("Floating Lyrics")
+    .title(runtime_display_name())
     .decorations(false)
     .transparent(false)
     .background_color(Color(12, 16, 24, 255))
@@ -569,6 +626,140 @@ fn ensure_window_mode_window(app: &tauri::AppHandle) -> tauri::Result<tauri::Web
     window::setup_window_events(&window);
     window::setup_window_mode_state_tracking(app.clone(), &window);
     Ok(window)
+}
+
+fn ensure_welcome_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    if let Some(window) = app.get_webview_window(mode::GUIDE_WINDOW_LABEL) {
+        return Ok(window);
+    }
+
+    let data_dir = webview_data_directory(app, "guide-webview");
+    let window = WebviewWindowBuilder::new(
+        app,
+        mode::GUIDE_WINDOW_LABEL,
+        WebviewUrl::External(current_welcome_url().parse().expect("valid welcome URL")),
+    )
+    .title(format!("{} Guide", runtime_display_name()))
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(true)
+    .skip_taskbar(false)
+    .visible(false)
+    .focused(true)
+    .background_color(Color(0, 0, 0, 0))
+    .initialization_script(WELCOME_WINDOW_SCRIPT)
+    .data_directory(data_dir)
+    .build()?;
+
+    let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+    window::apply_windows_visual_tweaks(&window);
+    setup_welcome_window_events(&window);
+    Ok(window)
+}
+
+fn setup_welcome_window_events(window: &tauri::WebviewWindow) {
+    let welcome_window = window.clone();
+    window.on_window_event(move |event| match event {
+        tauri::WindowEvent::CloseRequested { api, .. } => {
+            if !APP_EXITING.load(Ordering::SeqCst)
+                && WELCOME_WINDOW_ACTIVE.load(Ordering::SeqCst)
+                && !WELCOME_CLOSE_ALLOWED.load(Ordering::SeqCst)
+            {
+                api.prevent_close();
+                let _ = welcome_window.set_focus();
+            }
+        }
+        tauri::WindowEvent::Focused(false) => {
+            if WELCOME_WINDOW_ACTIVE.load(Ordering::SeqCst) {
+                let _ = welcome_window.set_focus();
+            }
+        }
+        _ => {}
+    });
+}
+
+fn current_welcome_url() -> String {
+    current_runtime_endpoint()
+        .and_then(|endpoint| {
+            network::get_working_url(
+                endpoint.primary_ip,
+                endpoint.fallback_ip,
+                endpoint.port,
+                LOCAL_WELCOME_PATH,
+            )
+        })
+        .unwrap_or_else(|| format!("http://{}:{}{}", LOCAL_HOST, LOCAL_PORT, LOCAL_WELCOME_PATH))
+}
+
+fn apply_welcome_window_layout(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    let selected_idx = settings::SELECTED_MONITOR_INDEX.load(Ordering::SeqCst);
+    if let Ok(monitors) = app.available_monitors() {
+        if let Some(monitor) = monitors.get(selected_idx) {
+            window::apply_full_monitor_layout(
+                window,
+                monitor.position().x,
+                monitor.position().y,
+                *monitor.size(),
+            );
+            return;
+        }
+    }
+
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        window::apply_full_monitor_layout(
+            window,
+            monitor.position().x,
+            monitor.position().y,
+            *monitor.size(),
+        );
+    }
+}
+
+fn pause_normal_window_for_welcome(app: &tauri::AppHandle) {
+    settings::set_lyrics_paused_for_mode(WindowMode::Normal, true);
+    if mode::current_mode() == WindowMode::Normal {
+        settings::LYRICS_PAUSED.store(true, Ordering::SeqCst);
+    }
+
+    if let Some(window) = app.get_webview_window(mode::NORMAL_WINDOW_LABEL) {
+        scripts::apply_lyrics_paused(&window, true);
+    }
+
+    menu::update_color_menu_labels(app);
+}
+
+fn restore_after_welcome(app: &tauri::AppHandle) {
+    WELCOME_WINDOW_ACTIVE.store(false, Ordering::SeqCst);
+    WELCOME_CLOSE_ALLOWED.store(false, Ordering::SeqCst);
+
+    let restore_paused = WELCOME_RESTORE_NORMAL_PAUSED.load(Ordering::SeqCst);
+    settings::set_lyrics_paused_for_mode(WindowMode::Normal, restore_paused);
+    if mode::current_mode() == WindowMode::Normal {
+        settings::LYRICS_PAUSED.store(restore_paused, Ordering::SeqCst);
+    }
+
+    if let Some(window) = ensure_main_window(app).ok() {
+        if let Some(url) = current_lyrics_url() {
+            let needs_navigation = window
+                .url()
+                .map(|current| current.as_str() != url)
+                .unwrap_or(true);
+            if needs_navigation {
+                let _ = window.navigate(url.parse().expect("valid URL"));
+            }
+        }
+
+        scripts::apply_lyrics_paused(&window, restore_paused);
+        if !window.is_visible().unwrap_or(false) {
+            window::show_without_focus(&window);
+        }
+    }
+
+    menu::update_color_menu_labels(app);
 }
 
 pub fn switch_window_mode(app: &tauri::AppHandle, target_mode: WindowMode) {
@@ -668,6 +859,25 @@ pub fn close_window_mode(app: &tauri::AppHandle) {
     }
 
     switch_window_mode(app, WindowMode::Normal);
+}
+
+pub fn close_welcome_window(app: &tauri::AppHandle) {
+    if !WELCOME_WINDOW_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
+
+    WELCOME_CLOSE_ALLOWED.store(true, Ordering::SeqCst);
+    settings::HAS_SEEN_WELCOME.store(true, Ordering::SeqCst);
+    let mut normal_settings = settings::load_settings_for_mode(app, WindowMode::Normal);
+    normal_settings.has_seen_welcome = true;
+    settings::save_settings_for_mode(app, &normal_settings, WindowMode::Normal);
+
+    if let Some(window) = app.get_webview_window(mode::GUIDE_WINDOW_LABEL) {
+        window::animate_hide(&window);
+        let _ = window.close();
+    }
+
+    restore_after_welcome(app);
 }
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

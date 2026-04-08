@@ -31,6 +31,7 @@ goto :help
 :resolve_source
 if /I "%MODE%"=="serverless" set "SRC=%SRC_DIR%\serverless.rs" & set "TAURI_CONFIG=tauri.serverless.conf.json" & goto :eof
 if /I "%MODE%"=="standalone" set "SRC=%SRC_DIR%\standalone.rs" & set "TAURI_CONFIG=tauri.conf.json" & goto :eof
+if /I "%MODE%"=="ytm" set "SRC=%SRC_DIR%\ytm.rs" & set "TAURI_CONFIG=tauri.ytm.conf.json" & goto :eof
 if /I "%MODE%"=="both" set "SRC=both" & goto :eof
 if /I "%MODE%"=="all" set "SRC=all" & goto :eof
 echo Invalid mode: %MODE%
@@ -188,11 +189,11 @@ exit /b 0
 
 :dev
 if /I "%MODE%"=="both" (
-  echo dev supports only one mode at a time: serverless or standalone.
+  echo dev supports only one mode at a time: serverless, standalone, or ytm.
   exit /b 1
 )
 if /I "%MODE%"=="all" (
-  echo dev supports only one mode at a time: serverless or standalone.
+  echo dev supports only one mode at a time: serverless, standalone, or ytm.
   exit /b 1
 )
 call :resolve_source
@@ -237,17 +238,26 @@ exit /b %ERR%
   set "SRC=%SRC_DIR%\standalone.rs"
   set "TAURI_CONFIG=tauri.conf.json"
   call :build_current
+  if errorlevel 1 (
+    set "ERR=%ERRORLEVEL%"
+    popd
+    exit /b %ERR%
+  )
+  set "MODE=ytm"
+  set "SRC=%SRC_DIR%\ytm.rs"
+  set "TAURI_CONFIG=tauri.ytm.conf.json"
+  call :build_current
   set "ERR=%ERRORLEVEL%"
   popd
   exit /b %ERR%
 
 :devwatch
 if /I "%MODE%"=="both" (
-  echo dev-watch supports only one mode at a time: serverless or standalone.
+  echo dev-watch supports only one mode at a time: serverless, standalone, or ytm.
   exit /b 1
 )
 if /I "%MODE%"=="all" (
-  echo dev-watch supports only one mode at a time: serverless or standalone.
+  echo dev-watch supports only one mode at a time: serverless, standalone, or ytm.
   exit /b 1
 )
 call :resolve_source
@@ -277,15 +287,19 @@ exit /b %ERR%
 echo Usage:
 echo   tauri.cmd dev serverless [host^|x64]
 echo   tauri.cmd dev [standalone] [host^|x64]
+echo   tauri.cmd dev ytm [host^|x64]
 echo   tauri.cmd build serverless [host^|x64]
 echo   tauri.cmd build [standalone] [host^|x64]
+echo   tauri.cmd build ytm [host^|x64]
 echo   tauri.cmd build both [host^|x64]
 echo   tauri.cmd build all [host^|x64]
 echo   tauri.cmd dev-watch serverless [host^|x64]
 echo   tauri.cmd dev-watch [standalone] [host^|x64]
+echo   tauri.cmd dev-watch ytm [host^|x64]
 echo.
 echo Examples:
 echo   tauri.cmd build
 echo   tauri.cmd build standalone x64
+echo   tauri.cmd build ytm x64
 echo   tauri.cmd build all x64
 exit /b 1

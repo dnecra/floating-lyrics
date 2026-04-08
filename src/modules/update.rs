@@ -42,6 +42,13 @@ struct UpdateContext {
     owner: &'static str,
     repo: &'static str,
     exe_relative: &'static str,
+    asset_kind: ReleaseAssetKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseAssetKind {
+    Archive7z,
+    Executable,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,6 +73,7 @@ struct ResolvedServerRelease {
     sha256: String,
     asset_name: String,
     exe_name: String,
+    asset_kind: ReleaseAssetKind,
 }
 
 #[derive(Debug, Clone)]
@@ -128,17 +136,17 @@ pub fn ensure_server_ready(
             release.tag
         );
     } else {
-    println!(
-        "Preparing standalone server from the latest GitHub release for {}/{}...",
-        context.owner, context.repo
-    );
-    set_state(app, ServerUpdateState::Downloading);
-    install_release(app, &context, &release, false)?;
-    persist_installed_version(app, &release.tag)?;
-    println!(
-        "Standalone server bootstrap complete. Installed version {}",
-        release.tag
-    );
+        println!(
+            "Preparing standalone server from the latest GitHub release for {}/{}...",
+            context.owner, context.repo
+        );
+        set_state(app, ServerUpdateState::Downloading);
+        install_release(app, &context, &release, false)?;
+        persist_installed_version(app, &release.tag)?;
+        println!(
+            "Standalone server bootstrap complete. Installed version {}",
+            release.tag
+        );
     }
     set_state(app, ServerUpdateState::Idle);
     Ok(())
@@ -182,7 +190,10 @@ pub fn tray_menu_descriptor() -> Option<(String, bool)> {
         }
         ServerUpdateState::Failed => {
             let version_suffix = display_tag_suffix();
-            Some((format!("Retry latest server download{version_suffix}"), true))
+            Some((
+                format!("Retry latest server download{version_suffix}"),
+                true,
+            ))
         }
     }
 }
@@ -248,6 +259,13 @@ fn configure_context(
             owner: STANDALONE_RELEASE_OWNER,
             repo: STANDALONE_RELEASE_REPO,
             exe_relative,
+            asset_kind: ReleaseAssetKind::Archive7z,
+        }),
+        Variant::Ytm => Some(UpdateContext {
+            owner: STANDALONE_RELEASE_OWNER,
+            repo: STANDALONE_RELEASE_REPO,
+            exe_relative,
+            asset_kind: ReleaseAssetKind::Executable,
         }),
         _ => None,
     }
@@ -284,29 +302,41 @@ fn install_release(
     let temp_root = updater_temp_dir(app)?;
     fs::create_dir_all(&temp_root).map_err(|error| error.to_string())?;
 
-    let staged_asset_path = temp_root.join(&release.asset_name);
     let staged_exe_path = temp_root.join(&release.exe_name);
+    let staged_asset_path = temp_root.join(&release.asset_name);
 
     println!(
         "Downloading standalone server version {} from {}",
         release.tag, release.url
     );
-    download_release_asset_with_retry(release, &staged_asset_path)?;
-    println!(
-        "Verifying standalone server checksum for {}",
-        staged_asset_path.display()
-    );
-    verify_file_hash(&staged_asset_path, &release.sha256)?;
-    println!(
-        "Extracting standalone server archive {}",
-        staged_asset_path.display()
-    );
-    extract_7z_archive(
-        &staged_asset_path,
-        &temp_root,
-        &release.exe_name,
-        &staged_exe_path,
-    )?;
+    match release.asset_kind {
+        ReleaseAssetKind::Archive7z => {
+            download_release_asset_with_retry(release, &staged_asset_path)?;
+            println!(
+                "Verifying standalone server checksum for {}",
+                staged_asset_path.display()
+            );
+            verify_file_hash(&staged_asset_path, &release.sha256)?;
+            println!(
+                "Extracting standalone server archive {}",
+                staged_asset_path.display()
+            );
+            extract_7z_archive(
+                &staged_asset_path,
+                &temp_root,
+                &release.exe_name,
+                &staged_exe_path,
+            )?;
+        }
+        ReleaseAssetKind::Executable => {
+            download_release_asset_with_retry(release, &staged_exe_path)?;
+            println!(
+                "Verifying standalone server checksum for {}",
+                staged_exe_path.display()
+            );
+            verify_file_hash(&staged_exe_path, &release.sha256)?;
+        }
+    }
     set_state(app, ServerUpdateState::Installing);
     println!("Installing standalone server to {}", target_path.display());
 
@@ -332,10 +362,14 @@ fn install_release(
     Ok(())
 }
 
-fn fetch_latest_release_with_retry(context: &UpdateContext) -> Result<ResolvedServerRelease, String> {
-    retry_with_backoff(RELEASE_FETCH_RETRIES, "fetch latest GitHub release metadata", || {
-        fetch_latest_release(context)
-    })
+fn fetch_latest_release_with_retry(
+    context: &UpdateContext,
+) -> Result<ResolvedServerRelease, String> {
+    retry_with_backoff(
+        RELEASE_FETCH_RETRIES,
+        "fetch latest GitHub release metadata",
+        || fetch_latest_release(context),
+    )
 }
 
 fn fetch_latest_release(context: &UpdateContext) -> Result<ResolvedServerRelease, String> {
@@ -376,9 +410,14 @@ fn resolve_release_asset(
     let asset = release
         .assets
         .iter()
-        .find(|asset| asset_matches(asset))
+        .find(|asset| asset_matches(asset, context.asset_kind, expected_name))
         .cloned()
-        .ok_or_else(|| "No .7z server asset found in the latest release".to_string())?;
+        .ok_or_else(|| {
+            format!(
+                "No matching {} server asset found in the latest release",
+                context.asset_kind.extension_label()
+            )
+        })?;
 
     let digest = asset
         .digest
@@ -397,12 +436,31 @@ fn resolve_release_asset(
         sha256: digest.to_string(),
         asset_name: asset.name,
         exe_name: expected_name.to_string(),
+        asset_kind: context.asset_kind,
     })
 }
 
-fn asset_matches(asset: &GitHubReleaseAsset) -> bool {
+impl ReleaseAssetKind {
+    fn extension_label(self) -> &'static str {
+        match self {
+            Self::Archive7z => ".7z",
+            Self::Executable => ".exe",
+        }
+    }
+}
+
+fn asset_matches(
+    asset: &GitHubReleaseAsset,
+    asset_kind: ReleaseAssetKind,
+    expected_name: &str,
+) -> bool {
     let lower_name = asset.name.to_ascii_lowercase();
-    lower_name.ends_with(".7z") && !asset.browser_download_url.trim().is_empty()
+    let expected_name = expected_name.to_ascii_lowercase();
+    !asset.browser_download_url.trim().is_empty()
+        && match asset_kind {
+            ReleaseAssetKind::Archive7z => lower_name.ends_with(".7z"),
+            ReleaseAssetKind::Executable => lower_name == expected_name,
+        }
 }
 
 fn parse_github_digest(digest: &str) -> Option<&str> {
@@ -472,9 +530,11 @@ fn download_release_asset_with_retry(
     release: &ResolvedServerRelease,
     destination_path: &Path,
 ) -> Result<(), String> {
-    retry_with_backoff(RELEASE_DOWNLOAD_RETRIES, "download latest server asset", || {
-        download_release_asset(release, destination_path)
-    })
+    retry_with_backoff(
+        RELEASE_DOWNLOAD_RETRIES,
+        "download latest server asset",
+        || download_release_asset(release, destination_path),
+    )
 }
 
 fn download_release_asset(
@@ -510,9 +570,8 @@ fn download_release_asset(
 
     file.flush().map_err(|error| error.to_string())?;
     let _ = fs::remove_file(destination_path);
-    fs::rename(&partial_path, destination_path).map_err(|error| {
-        format!("Failed to move downloaded server asset into place: {error}")
-    })
+    fs::rename(&partial_path, destination_path)
+        .map_err(|error| format!("Failed to move downloaded server asset into place: {error}"))
 }
 
 fn extract_7z_archive(
@@ -713,7 +772,10 @@ fn cached_release_tag() -> Option<String> {
 }
 
 fn cached_installed_tag() -> Option<String> {
-    INSTALLED_RELEASE_TAG.lock().ok().and_then(|slot| slot.clone())
+    INSTALLED_RELEASE_TAG
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
 }
 
 fn hydrate_installed_release_tag(app: &AppHandle) {
@@ -752,7 +814,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{asset_matches, normalize_release_tag, GitHubReleaseAsset};
+    use super::{asset_matches, normalize_release_tag, GitHubReleaseAsset, ReleaseAssetKind};
 
     #[test]
     fn preserves_release_tag() {
@@ -766,7 +828,11 @@ mod tests {
             browser_download_url: "https://example.com/file.7z".to_string(),
             digest: Some("sha256:abc".to_string()),
         };
-        assert!(asset_matches(&asset));
+        assert!(asset_matches(
+            &asset,
+            ReleaseAssetKind::Archive7z,
+            "lyrics-smtc-x64.exe"
+        ));
     }
 
     #[test]
@@ -776,6 +842,38 @@ mod tests {
             browser_download_url: "https://example.com/file.exe".to_string(),
             digest: Some("sha256:abc".to_string()),
         };
-        assert!(!asset_matches(&asset));
+        assert!(!asset_matches(
+            &asset,
+            ReleaseAssetKind::Archive7z,
+            "lyrics-smtc-x64.exe"
+        ));
+    }
+
+    #[test]
+    fn matches_expected_executable_asset() {
+        let asset = GitHubReleaseAsset {
+            name: "lyrics-ytm-x64.exe".to_string(),
+            browser_download_url: "https://example.com/file.exe".to_string(),
+            digest: Some("sha256:abc".to_string()),
+        };
+        assert!(asset_matches(
+            &asset,
+            ReleaseAssetKind::Executable,
+            "lyrics-ytm-x64.exe"
+        ));
+    }
+
+    #[test]
+    fn rejects_mismatched_executable_asset() {
+        let asset = GitHubReleaseAsset {
+            name: "lyrics-smtc-x64.exe".to_string(),
+            browser_download_url: "https://example.com/file.exe".to_string(),
+            digest: Some("sha256:abc".to_string()),
+        };
+        assert!(!asset_matches(
+            &asset,
+            ReleaseAssetKind::Executable,
+            "lyrics-ytm-x64.exe"
+        ));
     }
 }

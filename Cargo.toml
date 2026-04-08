@@ -1,6 +1,6 @@
 [package]
 name = "floating-lyrics"
-version = "1.2.4"
+version = "1.2.5"
 description = "Floating Lyrics Display"
 authors = ["necra"]
 edition = "2021"
@@ -36,6 +36,7 @@ windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsA
 default = []
 serverless = ["dep:tiny_http"]
 standalone = []
+ytm = []
 custom-protocol = ["tauri/custom-protocol"]
 
 [profile.release]

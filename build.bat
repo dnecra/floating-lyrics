@@ -1,2 +1,2 @@
 @echo off
-tauri.cmd build standalone x64
+tauri.cmd build ytm x64

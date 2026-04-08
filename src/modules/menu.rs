@@ -1,14 +1,14 @@
-use std::time::Duration;
-use std::net::{IpAddr, Ipv4Addr, UdpSocket};
-use std::sync::atomic::Ordering;
-use std::sync::Mutex;
-use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
-use tauri_plugin_opener::OpenerExt;
 use crate::app_runtime::Variant;
 use crate::modules::mode::{self, WindowMode};
 use crate::modules::scripts;
 use crate::modules::settings::*;
 use crate::modules::window::*;
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
+use std::time::Duration;
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
+use tauri_plugin_opener::OpenerExt;
 
 lazy_static::lazy_static! {
     static ref TRAY_MENU_HANDLE: Mutex<Option<Menu<tauri::Wry>>> = Mutex::new(None);
@@ -89,7 +89,10 @@ fn tray_browser_url() -> String {
 fn tray_browser_menu_text() -> String {
     match crate::app_runtime::current_variant() {
         Some(Variant::Serverless) => {
-            serverless_base_url().trim_start_matches("http://").to_string() + "/lyrics"
+            serverless_base_url()
+                .trim_start_matches("http://")
+                .to_string()
+                + "/lyrics"
         }
         _ => local_ipv4_menu_text(),
     }

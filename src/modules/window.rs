@@ -401,7 +401,7 @@ pub fn setup_window_position(app: &tauri::AppHandle, window: &tauri::WebviewWind
     let selected_idx = SELECTED_MONITOR_INDEX.load(Ordering::SeqCst);
     if let Ok(monitors) = app.available_monitors() {
         if let Some(monitor) = monitors.get(selected_idx) {
-            apply_monitor_layout(
+            apply_full_monitor_layout(
                 window,
                 monitor.position().x,
                 monitor.position().y,
@@ -412,11 +412,11 @@ pub fn setup_window_position(app: &tauri::AppHandle, window: &tauri::WebviewWind
     }
     // Fallback: current monitor.
     if let Ok(Some(monitor)) = window.current_monitor() {
-        apply_monitor_layout(window, 0, 0, *monitor.size());
+        apply_full_monitor_layout(window, 0, 0, *monitor.size());
     }
 }
 
-fn apply_monitor_layout(
+pub fn apply_full_monitor_layout(
     window: &tauri::WebviewWindow,
     monitor_x: i32,
     monitor_y: i32,
@@ -457,7 +457,12 @@ pub fn start_monitor_watcher(window: tauri::WebviewWindow) {
                 );
                 if last_key.as_ref() != Some(&key) {
                     last_key = Some(key);
-                    apply_monitor_layout(&window, mon.position().x, mon.position().y, *mon.size());
+                    apply_full_monitor_layout(
+                        &window,
+                        mon.position().x,
+                        mon.position().y,
+                        *mon.size(),
+                    );
                     apply_always_on_top_preference(&window);
                     #[cfg(target_os = "macos")]
                     let _ = window.set_visible_on_all_workspaces(true);

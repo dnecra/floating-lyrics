@@ -12,11 +12,11 @@ use std::path::PathBuf;
 use std::ffi::c_void;
 
 #[cfg(windows)]
+use windows::core::PCWSTR;
+#[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
 #[cfg(windows)]
 use windows::Win32::System::Threading::CreateMutexW;
-#[cfg(windows)]
-use windows::core::PCWSTR;
 
 lazy_static::lazy_static! {
     static ref APP_LOCK_FILE: Mutex<Option<File>> = Mutex::new(None);
@@ -49,7 +49,10 @@ pub fn release_app_lock() {
 
 #[cfg(windows)]
 fn acquire_windows_app_lock() -> bool {
-    let name: Vec<u16> = APP_LOCK_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = APP_LOCK_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) };
 
     let Ok(handle) = handle else {
@@ -78,7 +81,10 @@ fn acquire_windows_app_lock() -> bool {
 
 #[cfg(windows)]
 fn release_windows_app_lock() {
-    let handle = APP_MUTEX_HANDLE.lock().ok().and_then(|mut slot| slot.take());
+    let handle = APP_MUTEX_HANDLE
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
     if let Some(raw) = handle {
         unsafe {
             let _ = CloseHandle(HANDLE(raw as *mut c_void));

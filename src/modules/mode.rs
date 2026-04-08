@@ -3,6 +3,7 @@ use tauri::Manager;
 
 pub const NORMAL_WINDOW_LABEL: &str = "main";
 pub const WINDOW_MODE_LABEL: &str = "window_mode";
+pub const GUIDE_WINDOW_LABEL: &str = "guide";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowMode {

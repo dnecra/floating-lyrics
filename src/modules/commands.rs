@@ -90,6 +90,11 @@ pub fn close_window_mode(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+pub fn close_welcome_window(app: tauri::AppHandle) {
+    crate::app_runtime::close_welcome_window(&app);
+}
+
+#[tauri::command]
 pub fn start_window_mode_dragging(app: tauri::AppHandle) {
     let Some(window) = mode::active_window(&app) else {
         return;
