@@ -1,12 +1,18 @@
 use crate::modules::mode;
 use crate::modules::mode::WindowMode;
 use crate::modules::settings::*;
+use serde_json::json;
 use std::sync::atomic::Ordering;
 
 const TOGGLE_FANCY_ANIMATION_SCRIPT: &str =
     include_str!("../../scripts/toggle-expensive-effects.js");
 const TOGGLE_BLUR_EFFECTS_SCRIPT: &str = include_str!("../../scripts/toggle-blur-effects.js");
 const WINDOW_MODE_CHROME_SCRIPT: &str = include_str!("../../scripts/window-mode-chrome.js");
+const SWAP_LYRICS_CANDIDATE_SCRIPT: &str = include_str!("../../scripts/swap-lyrics-candidate.js");
+const SYNC_TRANSLATION_EXCLUDED_LANGUAGES_SCRIPT: &str =
+    include_str!("../../scripts/sync-translation-excluded-languages.js");
+const SET_TRANSLATION_ALLOWED_AND_SYNC_SCRIPT: &str =
+    include_str!("../../scripts/set-translation-allowed-and-sync.js");
 
 pub struct Scripts {
     pub transparent_bg_script: &'static str,
@@ -42,6 +48,74 @@ pub fn apply_lyrics_paused(window: &tauri::WebviewWindow, paused: bool) {
         }})();
         "#
     ));
+}
+
+pub fn run_active_window_script(app: &tauri::AppHandle, script: &str) {
+    if let Some(window) = mode::active_window(app) {
+        let _ = window.eval(script);
+    }
+}
+
+pub fn swap_lyrics_candidate(app: &tauri::AppHandle) {
+    run_active_window_script(app, SWAP_LYRICS_CANDIDATE_SCRIPT);
+}
+
+pub fn set_lyric_translation_allowed(app: &tauri::AppHandle, lang_id: &str, allowed: bool) {
+    run_active_window_script(
+        app,
+        &format!(
+            r#"
+            (() => {{
+                const run = {SET_TRANSLATION_ALLOWED_AND_SYNC_SCRIPT};
+                if (typeof run === "function") {{
+                    run('{lang_id}', {allowed});
+                }}
+            }})();
+            "#
+        ),
+    );
+}
+
+pub fn sync_translation_excluded_languages(app: &tauri::AppHandle) {
+    run_active_window_script(app, SYNC_TRANSLATION_EXCLUDED_LANGUAGES_SCRIPT);
+}
+
+pub fn apply_translation_excluded_languages(window: &tauri::WebviewWindow, languages: &[String]) {
+    let payload = json!(languages).to_string();
+    let _ = window.eval(&format!(
+        r#"
+        (() => {{
+            const languages = {payload};
+            try {{
+                if (typeof setLyricTranslationExcludedLanguages === "function") {{
+                    setLyricTranslationExcludedLanguages(languages);
+                    return;
+                }}
+            }} catch (_) {{}}
+            try {{
+                if (typeof window.setLyricTranslationExcludedLanguages === "function") {{
+                    window.setLyricTranslationExcludedLanguages(languages);
+                }}
+            }} catch (_) {{}}
+        }})();
+        "#
+    ));
+}
+
+pub fn restore_translation_excluded_languages(
+    window: tauri::WebviewWindow,
+    languages: Vec<String>,
+) {
+    if languages.is_empty() {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        for _ in 0..20 {
+            apply_translation_excluded_languages(&window, &languages);
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    });
 }
 
 // Apply fancy animation disabled style

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::webview::Color;
 use tauri::{menu::Menu, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -284,6 +284,7 @@ pub fn run(variant: Variant) {
             commands::start_window_mode_dragging,
             commands::log_hover_probe,
             commands::get_window_mode_chrome_state,
+            commands::sync_translation_excluded_languages,
             commands::close_welcome_window,
             commands::close_app,
         ])
@@ -296,6 +297,7 @@ pub fn run(variant: Variant) {
                 .collect();
             let tray_menu = Menu::with_items(app, menu_refs.as_slice())?;
             menu::set_runtime_tray_menu(tray_menu.clone());
+            menu::update_color_menu_labels(&app.handle());
 
             let _tray = TrayIconBuilder::new()
                 .icon(
@@ -305,7 +307,11 @@ pub fn run(variant: Variant) {
                 )
                 .tooltip(runtime_display_name())
                 .menu(&tray_menu)
-                .on_tray_icon_event(|_tray, _event| {})
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { .. } = event {
+                        scripts::sync_translation_excluded_languages(&tray.app_handle());
+                    }
+                })
                 .on_menu_event(move |app, event| {
                     menu::handle_menu_event(app, event.id.as_ref());
                 })
@@ -343,10 +349,7 @@ pub fn open_welcome_in_main_window(app: &tauri::AppHandle) {
     if !STARTUP_COMPLETE.load(Ordering::SeqCst) {
         return;
     }
-    if !matches!(
-        current_variant(),
-        Some(Variant::Standalone | Variant::Ytm)
-    ) {
+    if !matches!(current_variant(), Some(Variant::Standalone | Variant::Ytm)) {
         return;
     }
     let Some(window) = ensure_welcome_window(app).ok() else {
@@ -420,6 +423,10 @@ fn complete_startup(app: &tauri::AppHandle, cfg: RuntimeConfig) -> tauri::Result
 
     loaded_settings.click_through_enabled = true;
     settings::apply_loaded_settings(&loaded_settings);
+    menu::set_translation_excluded_languages(
+        app,
+        loaded_settings.translation_excluded_languages.clone(),
+    );
 
     window::apply_windows_visual_tweaks(&window);
     window::setup_window_position(app, &window);
@@ -437,6 +444,10 @@ fn complete_startup(app: &tauri::AppHandle, cfg: RuntimeConfig) -> tauri::Result
             &SCRIPTS,
             STARTUP_INJECTION_PASSES,
             WindowMode::Normal,
+        );
+        scripts::restore_translation_excluded_languages(
+            window.clone(),
+            loaded_settings.translation_excluded_languages.clone(),
         );
     }
 
@@ -459,10 +470,7 @@ fn complete_startup(app: &tauri::AppHandle, cfg: RuntimeConfig) -> tauri::Result
 
     menu::update_color_menu_labels(app);
     STARTUP_COMPLETE.store(true, Ordering::SeqCst);
-    let should_show_welcome = matches!(
-        current_variant(),
-        Some(Variant::Standalone | Variant::Ytm)
-    )
+    let should_show_welcome = matches!(current_variant(), Some(Variant::Standalone | Variant::Ytm))
         && (STARTUP_SHOW_REQUESTED.swap(false, Ordering::SeqCst)
             || !loaded_settings.has_seen_welcome);
     show_main_window(app);

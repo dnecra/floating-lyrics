@@ -3,17 +3,141 @@ use crate::modules::mode::{self, WindowMode};
 use crate::modules::scripts;
 use crate::modules::settings::*;
 use crate::modules::window::*;
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
+use tauri::menu::{
+    CheckMenuItem, IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, SubmenuBuilder,
+};
 use tauri_plugin_opener::OpenerExt;
 
 lazy_static::lazy_static! {
     static ref TRAY_MENU_HANDLE: Mutex<Option<Menu<tauri::Wry>>> = Mutex::new(None);
     static ref SERVER_UPDATE_MENU_ITEM: Mutex<Option<MenuItem<tauri::Wry>>> = Mutex::new(None);
     static ref SERVER_UPDATE_SEPARATOR: Mutex<Option<PredefinedMenuItem<tauri::Wry>>> = Mutex::new(None);
+    static ref TRANSLATION_EXCLUDED_LANGUAGES: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+}
+
+const COMMON_TRANSLATION_LANGS: &[(&str, &str)] = &[
+    ("id", "Indonesian"),
+    ("en", "English"),
+    ("ja", "Japanese"),
+    ("ko", "Korean"),
+    ("zh", "Chinese"),
+    ("th", "Thai"),
+    ("vi", "Vietnamese"),
+    ("es", "Spanish"),
+    ("pt", "Portuguese"),
+    ("ru", "Russian"),
+];
+
+const MORE_TRANSLATION_LANGS: &[(&str, &str)] = &[
+    ("af", "Afrikaans"),
+    ("am", "Amharic"),
+    ("ar", "Arabic"),
+    ("be", "Belarusian"),
+    ("bg", "Bulgarian"),
+    ("ber", "Berber"),
+    ("bn", "Bengali"),
+    ("cs", "Czech"),
+    ("da", "Danish"),
+    ("de", "German"),
+    ("el", "Greek"),
+    ("en", "English"),
+    ("eo", "Esperanto"),
+    ("es", "Spanish"),
+    ("et", "Estonian"),
+    ("fa", "Persian"),
+    ("fi", "Finnish"),
+    ("fr", "French"),
+    ("ga", "Irish"),
+    ("gu", "Gujarati"),
+    ("he", "Hebrew"),
+    ("hi", "Hindi"),
+    ("hu", "Hungarian"),
+    ("hy", "Armenian"),
+    ("id", "Indonesian"),
+    ("is", "Icelandic"),
+    ("it", "Italian"),
+    ("ja", "Japanese"),
+    ("kk", "Kazakh"),
+    ("km", "Khmer"),
+    ("kn", "Kannada"),
+    ("ko", "Korean"),
+    ("la", "Latin"),
+    ("lt", "Lithuanian"),
+    ("lv", "Latvian"),
+    ("mk", "Macedonian"),
+    ("mn", "Mongolian"),
+    ("my", "Burmese"),
+    ("nl", "Dutch"),
+    ("no", "Norwegian"),
+    ("pl", "Polish"),
+    ("pt", "Portuguese"),
+    ("rn", "Kirundi"),
+    ("ro", "Romanian"),
+    ("ru", "Russian"),
+    ("sk", "Slovak"),
+    ("sr", "Serbian"),
+    ("sv", "Swedish"),
+    ("ta", "Tamil"),
+    ("te", "Telugu"),
+    ("th", "Thai"),
+    ("tk", "Turkmen"),
+    ("tl", "Tagalog"),
+    ("tlh", "Klingon"),
+    ("tr", "Turkish"),
+    ("tt", "Tatar"),
+    ("uk", "Ukrainian"),
+    ("ur", "Urdu"),
+    ("vi", "Vietnamese"),
+    ("vo", "Volapuk"),
+    ("yi", "Yiddish"),
+    ("zh", "Chinese"),
+];
+
+fn translation_menu_item_label(_lang_id: &str, name: &str) -> String {
+    name.to_string()
+}
+
+fn translation_menu_item_id(lang_id: &str) -> String {
+    format!("exclude_translation:{lang_id}")
+}
+
+fn build_translation_submenu(
+    app: &tauri::AppHandle,
+) -> Result<tauri::menu::Submenu<tauri::Wry>, Box<dyn std::error::Error>> {
+    let mut more_builder = SubmenuBuilder::with_id(app, "exclude_translation_more", "More");
+    for (lang_id, name) in MORE_TRANSLATION_LANGS {
+        let item = CheckMenuItem::with_id(
+            app,
+            translation_menu_item_id(lang_id),
+            translation_menu_item_label(lang_id, name),
+            true,
+            false,
+            None::<&str>,
+        )?;
+        more_builder = more_builder.item(&item);
+    }
+    let more_submenu = more_builder.build()?;
+
+    let mut builder =
+        SubmenuBuilder::with_id(app, "exclude_translation_submenu", "Exclude translation");
+    for (lang_id, name) in COMMON_TRANSLATION_LANGS {
+        let item = CheckMenuItem::with_id(
+            app,
+            translation_menu_item_id(lang_id),
+            translation_menu_item_label(lang_id, name),
+            true,
+            false,
+            None::<&str>,
+        )?;
+        builder = builder.item(&item);
+    }
+
+    Ok(builder.separator().item(&more_submenu).build()?)
 }
 
 pub fn set_runtime_tray_menu(menu: Menu<tauri::Wry>) {
@@ -121,6 +245,45 @@ pub fn refresh_menu_labels() {
     }
 }
 
+pub fn set_translation_excluded_languages(app: &tauri::AppHandle, languages: Vec<String>) {
+    if let Ok(mut slot) = TRANSLATION_EXCLUDED_LANGUAGES.lock() {
+        *slot = languages.into_iter().collect();
+    }
+    update_translation_exclusion_menu_checks(app);
+}
+
+pub fn translation_excluded_languages_snapshot() -> Vec<String> {
+    let mut languages: Vec<String> = TRANSLATION_EXCLUDED_LANGUAGES
+        .lock()
+        .ok()
+        .map(|set| set.iter().cloned().collect())
+        .unwrap_or_default();
+    languages.sort();
+    languages
+}
+
+pub fn update_translation_exclusion_menu_checks(app: &tauri::AppHandle) {
+    let Some(menu) = active_menu(app) else { return };
+    let excluded = TRANSLATION_EXCLUDED_LANGUAGES
+        .lock()
+        .ok()
+        .map(|set| set.clone())
+        .unwrap_or_default();
+
+    for (lang_id, name) in COMMON_TRANSLATION_LANGS
+        .iter()
+        .chain(MORE_TRANSLATION_LANGS.iter())
+    {
+        let item_id = translation_menu_item_id(lang_id);
+        if let Some(item) = menu.get(&item_id) {
+            if let Some(check_item) = item.as_check_menuitem() {
+                let _ = check_item.set_checked(!excluded.contains(*lang_id));
+                let _ = check_item.set_text(translation_menu_item_label(lang_id, name));
+            }
+        }
+    }
+}
+
 pub fn update_color_menu_labels(app: &tauri::AppHandle) {
     if let Some(menu) = active_menu(app) {
         let normal_controls_enabled = normal_mode_only_controls_enabled();
@@ -138,6 +301,8 @@ pub fn update_color_menu_labels(app: &tauri::AppHandle) {
                 let _ = menu_item.set_text(tray_browser_menu_text());
             }
         }
+
+        update_translation_exclusion_menu_checks(app);
 
         // Update monitor checked states
         if let Ok(monitors) = app.available_monitors() {
@@ -238,6 +403,16 @@ pub fn build_menu_items(
     let sep = PredefinedMenuItem::separator(app)?;
     menu_items.push(sep.kind());
 
+    let change_lyrics_item =
+        MenuItem::with_id(app, "change_lyrics", "Change lyrics", true, None::<&str>)?;
+    menu_items.push(change_lyrics_item.kind());
+
+    let exclude_translation_submenu = build_translation_submenu(app)?;
+    menu_items.push(exclude_translation_submenu.kind());
+
+    let sep = PredefinedMenuItem::separator(app)?;
+    menu_items.push(sep.kind());
+
     let mode_toggle = CheckMenuItem::with_id(
         app,
         "mini_window_mode",
@@ -278,7 +453,7 @@ pub fn build_menu_items(
     let blur_item = CheckMenuItem::with_id(
         app,
         "blur_enabled",
-        "Blur",
+        "Blur Effect",
         true,
         blur_enabled,
         None::<&str>,
@@ -382,6 +557,22 @@ pub fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
             WindowMode::Window
         };
         crate::app_runtime::switch_window_mode(app, target_mode);
+        return;
+    }
+
+    if event_id == "change_lyrics" {
+        scripts::swap_lyrics_candidate(app);
+        return;
+    }
+
+    if let Some(lang_id) = event_id.strip_prefix("exclude_translation:") {
+        let item_id = translation_menu_item_id(lang_id);
+        if let Some(item) = active_menu(app).and_then(|menu| menu.get(&item_id)) {
+            if let Some(check_item) = item.as_check_menuitem() {
+                let allowed = check_item.is_checked().unwrap_or(true);
+                scripts::set_lyric_translation_allowed(app, lang_id, allowed);
+            }
+        }
         return;
     }
 

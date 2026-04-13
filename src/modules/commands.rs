@@ -134,3 +134,9 @@ pub fn get_window_mode_chrome_state(app: tauri::AppHandle) -> (bool, bool) {
         window.is_fullscreen().unwrap_or(false),
     )
 }
+
+#[tauri::command]
+pub fn sync_translation_excluded_languages(app: tauri::AppHandle, languages: Vec<String>) {
+    crate::modules::settings::save_translation_excluded_languages(&app, &languages);
+    crate::modules::menu::set_translation_excluded_languages(&app, languages);
+}

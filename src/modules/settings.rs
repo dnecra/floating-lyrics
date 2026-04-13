@@ -17,6 +17,7 @@ pub struct AppSettings {
     pub word_bounce_disabled: bool,
     pub blur_enabled: bool,
     pub has_seen_welcome: bool,
+    pub translation_excluded_languages: Vec<String>,
     pub window_mode_x: Option<i32>,
     pub window_mode_y: Option<i32>,
     pub window_mode_width: Option<u32>,
@@ -33,6 +34,7 @@ impl Default for AppSettings {
             word_bounce_disabled: false,
             blur_enabled: true,
             has_seen_welcome: false,
+            translation_excluded_languages: Vec::new(),
             window_mode_x: None,
             window_mode_y: None,
             window_mode_width: None,
@@ -95,6 +97,8 @@ pub fn snapshot_settings() -> AppSettings {
         word_bounce_disabled: WORD_BOUNCE_DISABLED.load(std::sync::atomic::Ordering::SeqCst),
         blur_enabled: BLUR_ENABLED.load(std::sync::atomic::Ordering::SeqCst),
         has_seen_welcome: HAS_SEEN_WELCOME.load(std::sync::atomic::Ordering::SeqCst),
+        translation_excluded_languages:
+            crate::modules::menu::translation_excluded_languages_snapshot(),
         window_mode_x: None,
         window_mode_y: None,
         window_mode_width: None,
@@ -201,4 +205,14 @@ pub fn save_window_mode_bounds(app: &tauri::AppHandle, x: i32, y: i32, width: u3
     settings.window_mode_width = Some(width);
     settings.window_mode_height = Some(height);
     save_settings_for_mode(app, &settings, WindowMode::Window);
+}
+
+pub fn save_translation_excluded_languages(app: &tauri::AppHandle, languages: &[String]) {
+    let mut normal_settings = load_settings_for_mode(app, WindowMode::Normal);
+    normal_settings.translation_excluded_languages = languages.to_vec();
+    save_settings_for_mode(app, &normal_settings, WindowMode::Normal);
+
+    let mut window_settings = load_settings_for_mode(app, WindowMode::Window);
+    window_settings.translation_excluded_languages = languages.to_vec();
+    save_settings_for_mode(app, &window_settings, WindowMode::Window);
 }

@@ -132,7 +132,7 @@ The system tray menu currently includes:
 - Always on top
 - Disable hide on hover
 - Fancy animations
-- Blur
+- Blur Effect
 - Pause lyrics
 - Open guide
 - Restart app
