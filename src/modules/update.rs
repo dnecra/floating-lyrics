@@ -30,6 +30,7 @@ const GITHUB_REQUEST_TIMEOUT_SECS: u64 = 180;
 const RELEASE_FETCH_RETRIES: usize = 5;
 const RELEASE_DOWNLOAD_RETRIES: usize = 5;
 const RETRY_DELAY_SECS: u64 = 2;
+const RELEASES_PAGE_SIZE: usize = 20;
 const RELEASE_CACHE_TTL_SECS: u64 = 60 * 60 * 24 * 7; // 7 days — background checker handles freshness
 
 lazy_static::lazy_static! {
@@ -147,25 +148,11 @@ pub fn ensure_server_ready(
     let installed_tag = cached_installed_tag();
     let has_managed_binary = target_path.is_file();
 
-    // If the binary is already installed and the persisted cache agrees it's current,
-    // skip the blocking API call entirely on startup. The background update check
-    // in initialize() runs 10 seconds later and will fetch + install any newer release.
-    if has_managed_binary {
-        if let Ok(Some(cached)) = read_cached_release(app) {
-            if installed_tag.as_deref() == Some(cached.tag.as_str()) {
-                println!(
-                    "Standalone server {} already installed and cache is fresh, skipping API call on startup",
-                    cached.tag
-                );
-                set_state(app, ServerUpdateState::Idle);
-                return Ok(());
-            }
-        }
-    }
-
+    // Always resolve the latest release from GitHub on startup now that
+    // authenticated requests use GITHUB_TOKEN instead of the anonymous rate limit.
     // Binary is missing or installed tag doesn't match cache — hit the API.
     set_state(app, ServerUpdateState::ResolvingLatest);
-    let release = fetch_latest_release_with_retry(app, &context, false)?;
+    let release = fetch_latest_release_with_retry(app, &context, true)?;
     cache_latest_release(app, release.clone());
 
     if has_managed_binary && installed_tag.as_deref() == Some(release.tag.as_str()) {
@@ -423,6 +410,19 @@ fn fetch_latest_release_with_retry(
 }
 
 fn fetch_latest_release(context: &UpdateContext) -> Result<ResolvedServerRelease, String> {
+    let client = github_client()?;
+    match context.asset_kind {
+        ReleaseAssetKind::Archive7z => fetch_latest_release_from_latest_endpoint(&client, context),
+        ReleaseAssetKind::Executable => {
+            fetch_latest_release_from_recent_releases(&client, context)
+        }
+    }
+}
+
+fn fetch_latest_release_from_latest_endpoint(
+    client: &Client,
+    context: &UpdateContext,
+) -> Result<ResolvedServerRelease, String> {
     let url = format!(
         "{}/repos/{}/{}/releases/latest",
         GITHUB_API_BASE, context.owner, context.repo
@@ -431,7 +431,6 @@ fn fetch_latest_release(context: &UpdateContext) -> Result<ResolvedServerRelease
         "Fetching latest standalone server release metadata from {}",
         url
     );
-    let client = github_client()?;
     let release = client
         .get(url)
         .send()
@@ -441,6 +440,45 @@ fn fetch_latest_release(context: &UpdateContext) -> Result<ResolvedServerRelease
         .map_err(|error| format!("Failed to parse latest GitHub release response: {error}"))?;
 
     resolve_release_asset(context, release)
+}
+
+fn fetch_latest_release_from_recent_releases(
+    client: &Client,
+    context: &UpdateContext,
+) -> Result<ResolvedServerRelease, String> {
+    let url = format!(
+        "{}/repos/{}/{}/releases?per_page={}",
+        GITHUB_API_BASE, context.owner, context.repo, RELEASES_PAGE_SIZE
+    );
+    println!("Fetching recent standalone server releases from {}", url);
+    let releases = client
+        .get(url)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| format!("Failed to fetch GitHub releases: {error}"))?
+        .json::<Vec<GitHubReleaseResponse>>()
+        .map_err(|error| format!("Failed to parse GitHub releases response: {error}"))?;
+
+    let mut saw_stable_release = false;
+    for release in releases {
+        if release.draft || release.prerelease {
+            continue;
+        }
+        saw_stable_release = true;
+        if let Ok(resolved) = resolve_release_asset(context, release) {
+            return Ok(resolved);
+        }
+    }
+
+    if saw_stable_release {
+        Err(format!(
+            "No matching {} server asset found in the latest {} stable releases",
+            context.asset_kind.extension_label(),
+            RELEASES_PAGE_SIZE
+        ))
+    } else {
+        Err("No stable GitHub releases are available".to_string())
+    }
 }
 
 fn resolve_release_asset(
