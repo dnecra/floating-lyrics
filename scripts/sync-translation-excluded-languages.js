@@ -5,9 +5,19 @@
     return;
   }
 
+  const getter =
+    typeof getLyricTranslationExcludedLanguages === "function"
+      ? getLyricTranslationExcludedLanguages
+      : typeof window.getLyricTranslationExcludedLanguages === "function"
+        ? window.getLyricTranslationExcludedLanguages
+        : null;
+  if (!getter) {
+    return;
+  }
+
   let excluded = [];
   try {
-    excluded = getLyricTranslationExcludedLanguages?.() || [];
+    excluded = getter() || [];
   } catch (_) {}
 
   Promise.resolve(excluded)

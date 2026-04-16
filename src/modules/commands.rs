@@ -140,3 +140,4 @@ pub fn sync_translation_excluded_languages(app: tauri::AppHandle, languages: Vec
     crate::modules::settings::save_translation_excluded_languages(&app, &languages);
     crate::modules::menu::set_translation_excluded_languages(&app, languages);
 }
+

@@ -9,10 +9,12 @@ const TOGGLE_FANCY_ANIMATION_SCRIPT: &str =
 const TOGGLE_BLUR_EFFECTS_SCRIPT: &str = include_str!("../../scripts/toggle-blur-effects.js");
 const WINDOW_MODE_CHROME_SCRIPT: &str = include_str!("../../scripts/window-mode-chrome.js");
 const SWAP_LYRICS_CANDIDATE_SCRIPT: &str = include_str!("../../scripts/swap-lyrics-candidate.js");
+const TOGGLE_TRANSLATION_EXCLUDE_AND_SYNC_SCRIPT: &str =
+    include_str!("../../scripts/toggle-translation-exclude-and-sync.js");
 const SYNC_TRANSLATION_EXCLUDED_LANGUAGES_SCRIPT: &str =
     include_str!("../../scripts/sync-translation-excluded-languages.js");
-const SET_TRANSLATION_ALLOWED_AND_SYNC_SCRIPT: &str =
-    include_str!("../../scripts/set-translation-allowed-and-sync.js");
+const RESTORE_TRANSLATION_EXCLUDED_LANGUAGES_SCRIPT: &str =
+    include_str!("../../scripts/restore-translation-excluded-languages.js");
 
 pub struct Scripts {
     pub transparent_bg_script: &'static str,
@@ -60,15 +62,15 @@ pub fn swap_lyrics_candidate(app: &tauri::AppHandle) {
     run_active_window_script(app, SWAP_LYRICS_CANDIDATE_SCRIPT);
 }
 
-pub fn set_lyric_translation_allowed(app: &tauri::AppHandle, lang_id: &str, allowed: bool) {
+pub fn toggle_lyric_translation_exclude(app: &tauri::AppHandle, lang_id: &str) {
     run_active_window_script(
         app,
         &format!(
             r#"
             (() => {{
-                const run = {SET_TRANSLATION_ALLOWED_AND_SYNC_SCRIPT};
+                const run = {TOGGLE_TRANSLATION_EXCLUDE_AND_SYNC_SCRIPT};
                 if (typeof run === "function") {{
-                    run('{lang_id}', {allowed});
+                    run('{lang_id}');
                 }}
             }})();
             "#
@@ -80,28 +82,6 @@ pub fn sync_translation_excluded_languages(app: &tauri::AppHandle) {
     run_active_window_script(app, SYNC_TRANSLATION_EXCLUDED_LANGUAGES_SCRIPT);
 }
 
-pub fn apply_translation_excluded_languages(window: &tauri::WebviewWindow, languages: &[String]) {
-    let payload = json!(languages).to_string();
-    let _ = window.eval(&format!(
-        r#"
-        (() => {{
-            const languages = {payload};
-            try {{
-                if (typeof setLyricTranslationExcludedLanguages === "function") {{
-                    setLyricTranslationExcludedLanguages(languages);
-                    return;
-                }}
-            }} catch (_) {{}}
-            try {{
-                if (typeof window.setLyricTranslationExcludedLanguages === "function") {{
-                    window.setLyricTranslationExcludedLanguages(languages);
-                }}
-            }} catch (_) {{}}
-        }})();
-        "#
-    ));
-}
-
 pub fn restore_translation_excluded_languages(
     window: tauri::WebviewWindow,
     languages: Vec<String>,
@@ -110,9 +90,19 @@ pub fn restore_translation_excluded_languages(
         return;
     }
 
+    let payload = json!(languages).to_string();
     std::thread::spawn(move || {
         for _ in 0..20 {
-            apply_translation_excluded_languages(&window, &languages);
+            let _ = window.eval(&format!(
+                r#"
+                (() => {{
+                    const run = {RESTORE_TRANSLATION_EXCLUDED_LANGUAGES_SCRIPT};
+                    if (typeof run === "function") {{
+                        run({payload});
+                    }}
+                }})();
+                "#
+            ));
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
     });

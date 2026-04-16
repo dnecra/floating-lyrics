@@ -25,6 +25,7 @@ const FADE_STEPS: u32 = 8;
 const FADE_STEP_MS: u64 = 22;
 const MODE_FADE_STEPS: u32 = 12;
 const MODE_FADE_STEP_MS: u64 = 25;
+const TOPMOST_REINFORCE_INTERVAL: Duration = Duration::from_millis(1200);
 
 static WINDOW_HIDDEN_BY_HOVER: AtomicBool = AtomicBool::new(false);
 
@@ -359,22 +360,16 @@ pub fn show_without_focus(window: &tauri::WebviewWindow) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Always-on-top  –  simple and passive (no polling, no fullscreen detection)
-//
-// Design goals:
-//   • When the setting is ON → window stays on top.
-//   • When the setting is OFF → window behaves normally.
-//   • We NEVER poll in a background thread → no taskbar flicker, no game input
-//     interference.
-//   • We re-apply on natural Tauri window events (focus, move, resize).
-//   • We do NOT use HWND_TOPMOST in a tight loop.
+// Always-on-top helpers
 // ─────────────────────────────────────────────────────────────────────────────
-pub fn apply_always_on_top_preference(window: &tauri::WebviewWindow) {
-    // In welcome mode we don't force always-on-top so the user can interact
-    // with the page naturally (e.g. browser focus is fine).
-    let want_topmost = ALWAYS_ON_TOP_ENABLED.load(Ordering::SeqCst)
+fn should_keep_window_topmost(window: &tauri::WebviewWindow) -> bool {
+    ALWAYS_ON_TOP_ENABLED.load(Ordering::SeqCst)
         && !LYRICS_PAUSED.load(Ordering::SeqCst)
-        && window.is_visible().unwrap_or(true);
+        && window.is_visible().unwrap_or(true)
+}
+
+pub fn apply_always_on_top_preference(window: &tauri::WebviewWindow) {
+    let want_topmost = should_keep_window_topmost(window);
 
     // Only call the OS if the state actually needs to change.
     let currently = window.is_always_on_top().unwrap_or(!want_topmost);
@@ -392,6 +387,27 @@ pub fn apply_always_on_top_preference(window: &tauri::WebviewWindow) {
 
 pub fn enforce_topmost(window: &tauri::WebviewWindow) {
     apply_always_on_top_preference(window);
+}
+
+pub fn start_topmost_reinforcer(window: tauri::WebviewWindow) {
+    thread::spawn(move || loop {
+        thread::sleep(TOPMOST_REINFORCE_INTERVAL);
+
+        if mode::current_mode() != WindowMode::Normal {
+            continue;
+        }
+
+        if !should_keep_window_topmost(&window) {
+            continue;
+        }
+
+        #[cfg(target_os = "windows")]
+        if has_foreground_fullscreen_window(&window) {
+            continue;
+        }
+
+        enforce_topmost(&window);
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -638,6 +654,71 @@ fn set_hwnd_topmost(window: &tauri::WebviewWindow) {
             );
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn has_foreground_fullscreen_window(window: &tauri::WebviewWindow) -> bool {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible,
+    };
+
+    fn rect_matches(a: &RECT, b: &RECT, tolerance: i32) -> bool {
+        (a.left - b.left).abs() <= tolerance
+            && (a.top - b.top).abs() <= tolerance
+            && (a.right - b.right).abs() <= tolerance
+            && (a.bottom - b.bottom).abs() <= tolerance
+    }
+
+    fn monitor_bounds(monitor: HMONITOR) -> Option<RECT> {
+        if monitor.0.is_null() {
+            return None;
+        }
+
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if unsafe { GetMonitorInfoW(monitor, &mut info as *mut MONITORINFO) }.as_bool() {
+            Some(info.rcMonitor)
+        } else {
+            None
+        }
+    }
+
+    let Ok(own_hwnd) = window.hwnd() else {
+        return false;
+    };
+    let own_hwnd = HWND(own_hwnd.0 as *mut core::ffi::c_void);
+
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.0.is_null() || foreground == own_hwnd {
+        return false;
+    }
+
+    if !unsafe { IsWindowVisible(foreground) }.as_bool() || unsafe { IsIconic(foreground) }.as_bool() {
+        return false;
+    }
+
+    let mut foreground_rect = RECT::default();
+    if unsafe { GetWindowRect(foreground, &mut foreground_rect) }.is_err() {
+        return false;
+    }
+
+    let foreground_monitor = unsafe { MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) };
+    let own_monitor = unsafe { MonitorFromWindow(own_hwnd, MONITOR_DEFAULTTONEAREST) };
+    if foreground_monitor != own_monitor {
+        return false;
+    }
+
+    let Some(bounds) = monitor_bounds(foreground_monitor) else {
+        return false;
+    };
+
+    rect_matches(&foreground_rect, &bounds, 2)
 }
 
 #[cfg(target_os = "windows")]

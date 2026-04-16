@@ -6,13 +6,14 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 use crate::app_runtime::Variant;
 
 const UPDATE_CHECK_DELAY_SECS: u64 = 10;
 const SERVER_UPDATE_FILE: &str = "server-update.json";
+const RELEASE_CACHE_FILE: &str = "server-release-cache.json";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const STANDALONE_RELEASE_OWNER: &str = match option_env!("FLOATING_LYRICS_STANDALONE_RELEASE_OWNER")
 {
@@ -29,6 +30,7 @@ const GITHUB_REQUEST_TIMEOUT_SECS: u64 = 180;
 const RELEASE_FETCH_RETRIES: usize = 5;
 const RELEASE_DOWNLOAD_RETRIES: usize = 5;
 const RETRY_DELAY_SECS: u64 = 2;
+const RELEASE_CACHE_TTL_SECS: u64 = 60 * 60 * 24 * 7; // 7 days — background checker handles freshness
 
 lazy_static::lazy_static! {
     static ref UPDATE_CONTEXT: Mutex<Option<UpdateContext>> = Mutex::new(None);
@@ -76,6 +78,23 @@ struct ResolvedServerRelease {
     asset_kind: ReleaseAssetKind,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct PersistedLatestRelease {
+    fetched_at_unix_secs: u64,
+    tag: String,
+    url: String,
+    sha256: String,
+    asset_name: String,
+    exe_name: String,
+    asset_kind: PersistedReleaseAssetKind,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+enum PersistedReleaseAssetKind {
+    Archive7z,
+    Executable,
+}
+
 #[derive(Debug, Clone)]
 pub enum ServerUpdateState {
     Idle,
@@ -99,6 +118,7 @@ pub fn initialize(app: AppHandle, variant: Variant, exe_relative: Option<&'stati
         *slot = Some(context);
     }
     hydrate_installed_release_tag(&app);
+    hydrate_cached_release(&app);
 
     crate::modules::menu::sync_server_update_menu(&app);
 
@@ -121,13 +141,32 @@ pub fn ensure_server_ready(
         *slot = Some(context.clone());
     }
     hydrate_installed_release_tag(app);
+    hydrate_cached_release(app);
 
-    set_state(app, ServerUpdateState::ResolvingLatest);
-    let release = fetch_latest_release_with_retry(&context)?;
-    cache_latest_release(release.clone());
     let target_path = resolve_target_path(app, &context)?;
     let installed_tag = cached_installed_tag();
     let has_managed_binary = target_path.is_file();
+
+    // If the binary is already installed and the persisted cache agrees it's current,
+    // skip the blocking API call entirely on startup. The background update check
+    // in initialize() runs 10 seconds later and will fetch + install any newer release.
+    if has_managed_binary {
+        if let Ok(Some(cached)) = read_cached_release(app) {
+            if installed_tag.as_deref() == Some(cached.tag.as_str()) {
+                println!(
+                    "Standalone server {} already installed and cache is fresh, skipping API call on startup",
+                    cached.tag
+                );
+                set_state(app, ServerUpdateState::Idle);
+                return Ok(());
+            }
+        }
+    }
+
+    // Binary is missing or installed tag doesn't match cache — hit the API.
+    set_state(app, ServerUpdateState::ResolvingLatest);
+    let release = fetch_latest_release_with_retry(app, &context, false)?;
+    cache_latest_release(app, release.clone());
 
     if has_managed_binary && installed_tag.as_deref() == Some(release.tag.as_str()) {
         println!(
@@ -151,7 +190,6 @@ pub fn ensure_server_ready(
     set_state(app, ServerUpdateState::Idle);
     Ok(())
 }
-
 pub fn managed_server_exe_path(app: &AppHandle, exe_relative: &str) -> Option<PathBuf> {
     let exe_name = Path::new(exe_relative).file_name()?;
     Some(
@@ -219,8 +257,8 @@ pub fn start_server_update(app: AppHandle) {
     thread::spawn(move || {
         let result = update_context().and_then(|context| {
             set_state(&app, ServerUpdateState::ResolvingLatest);
-            let release = fetch_latest_release_with_retry(&context)?;
-            cache_latest_release(release.clone());
+            let release = fetch_latest_release_with_retry(&app, &context, true)?;
+            cache_latest_release(&app, release.clone());
             set_state(&app, ServerUpdateState::Downloading);
             install_release(&app, &context, &release, true)?;
             persist_installed_version(&app, &release.tag)?;
@@ -281,13 +319,17 @@ fn update_context() -> Result<UpdateContext, String> {
 
 fn run_update_check(app: &AppHandle) -> Result<(), String> {
     let context = update_context()?;
+    if cached_release_is_fresh(app) {
+        set_state(app, ServerUpdateState::Idle);
+        return Ok(());
+    }
     println!(
         "Resolving latest standalone server release in {}/{}",
         context.owner, context.repo
     );
-    let release = fetch_latest_release_with_retry(&context)?;
+    let release = fetch_latest_release_with_retry(app, &context, false)?;
     println!("Latest standalone server release is {}", release.tag);
-    cache_latest_release(release);
+    cache_latest_release(app, release);
     set_state(app, ServerUpdateState::Idle);
     Ok(())
 }
@@ -363,8 +405,16 @@ fn install_release(
 }
 
 fn fetch_latest_release_with_retry(
+    app: &AppHandle,
     context: &UpdateContext,
+    force_refresh: bool,
 ) -> Result<ResolvedServerRelease, String> {
+    if !force_refresh {
+        if let Some(release) = read_cached_release(app)? {
+            return Ok(release);
+        }
+    }
+
     retry_with_backoff(
         RELEASE_FETCH_RETRIES,
         "fetch latest GitHub release metadata",
@@ -449,6 +499,51 @@ impl ReleaseAssetKind {
     }
 }
 
+impl PersistedLatestRelease {
+    fn from_release(release: &ResolvedServerRelease) -> Self {
+        Self {
+            fetched_at_unix_secs: current_unix_secs(),
+            tag: release.tag.clone(),
+            url: release.url.clone(),
+            sha256: release.sha256.clone(),
+            asset_name: release.asset_name.clone(),
+            exe_name: release.exe_name.clone(),
+            asset_kind: release.asset_kind.into(),
+        }
+    }
+}
+
+impl From<PersistedLatestRelease> for ResolvedServerRelease {
+    fn from(value: PersistedLatestRelease) -> Self {
+        Self {
+            tag: value.tag,
+            url: value.url,
+            sha256: value.sha256,
+            asset_name: value.asset_name,
+            exe_name: value.exe_name,
+            asset_kind: value.asset_kind.into(),
+        }
+    }
+}
+
+impl From<ReleaseAssetKind> for PersistedReleaseAssetKind {
+    fn from(value: ReleaseAssetKind) -> Self {
+        match value {
+            ReleaseAssetKind::Archive7z => Self::Archive7z,
+            ReleaseAssetKind::Executable => Self::Executable,
+        }
+    }
+}
+
+impl From<PersistedReleaseAssetKind> for ReleaseAssetKind {
+    fn from(value: PersistedReleaseAssetKind) -> Self {
+        match value {
+            PersistedReleaseAssetKind::Archive7z => Self::Archive7z,
+            PersistedReleaseAssetKind::Executable => Self::Executable,
+        }
+    }
+}
+
 fn asset_matches(
     asset: &GitHubReleaseAsset,
     asset_kind: ReleaseAssetKind,
@@ -472,10 +567,29 @@ fn normalize_release_tag(tag_name: &str) -> String {
 }
 
 fn github_client() -> Result<Client, String> {
+    let token = std::env::var("GITHUB_TOKEN")
+        .map_err(|_| "GITHUB_TOKEN is required for standalone server release downloads".to_string())
+        .and_then(|token| {
+            let trimmed = token.trim().to_string();
+            if trimmed.is_empty() {
+                Err("GITHUB_TOKEN is required for standalone server release downloads".to_string())
+            } else {
+                Ok(trimmed)
+            }
+        })?;
+    let auth_value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|error| {
+            format!("GITHUB_TOKEN is invalid for GitHub Authorization header: {error}")
+        })?;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::AUTHORIZATION, auth_value);
+
+    // Never bundle a token in release builds — this is for local development only.
     Client::builder()
         .connect_timeout(Duration::from_secs(GITHUB_CONNECT_TIMEOUT_SECS))
         .timeout(Duration::from_secs(GITHUB_REQUEST_TIMEOUT_SECS))
         .user_agent(USER_AGENT)
+        .default_headers(headers)
         .build()
         .map_err(|error| error.to_string())
 }
@@ -729,10 +843,11 @@ fn begin_transition_to_downloading(app: &AppHandle) -> bool {
     changed
 }
 
-fn cache_latest_release(release: ResolvedServerRelease) {
+fn cache_latest_release(app: &AppHandle, release: ResolvedServerRelease) {
     if let Ok(mut slot) = LATEST_RELEASE.lock() {
-        *slot = Some(release);
+        *slot = Some(release.clone());
     }
+    let _ = persist_cached_release(app, &release);
 }
 
 fn idle_tray_descriptor() -> (String, bool) {
@@ -785,6 +900,59 @@ fn hydrate_installed_release_tag(app: &AppHandle) {
     }
 }
 
+fn hydrate_cached_release(app: &AppHandle) {
+    let cached = read_cached_release(app).ok().flatten();
+    if let Ok(mut slot) = LATEST_RELEASE.lock() {
+        *slot = cached;
+    }
+}
+
+fn cached_release_is_fresh(app: &AppHandle) -> bool {
+    read_cached_release(app)
+        .map(|cached| cached.is_some())
+        .unwrap_or(false)
+}
+
+fn read_cached_release(app: &AppHandle) -> Result<Option<ResolvedServerRelease>, String> {
+    let path = persisted_release_cache_path(app)?;
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let cached: PersistedLatestRelease =
+        serde_json::from_str(&contents).map_err(|error| error.to_string())?;
+    if current_unix_secs().saturating_sub(cached.fetched_at_unix_secs) > RELEASE_CACHE_TTL_SECS {
+        return Ok(None);
+    }
+    Ok(Some(cached.into()))
+}
+
+fn persist_cached_release(app: &AppHandle, release: &ResolvedServerRelease) -> Result<(), String> {
+    let path = persisted_release_cache_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let payload = PersistedLatestRelease::from_release(release);
+    let json = serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())?;
+    fs::write(path, json).map_err(|error| error.to_string())
+}
+
+fn persisted_release_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join(RELEASE_CACHE_FILE))
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 fn retry_with_backoff<T, F>(attempts: usize, action: &str, mut operation: F) -> Result<T, String>
 where
     F: FnMut() -> Result<T, String>,
@@ -799,6 +967,10 @@ where
                     "Failed to {} (attempt {}/{}): {}",
                     action, attempt, attempts, last_error
                 );
+                let lower = last_error.to_ascii_lowercase();
+                if lower.contains("rate limit") || lower.contains("403") {
+                    break;
+                }
                 if attempt < attempts {
                     thread::sleep(Duration::from_secs(RETRY_DELAY_SECS * attempt as u64));
                 }

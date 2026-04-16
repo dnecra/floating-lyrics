@@ -289,6 +289,12 @@ pub fn run(variant: Variant) {
             commands::close_app,
         ])
         .setup(move |app| {
+            let initial_settings = settings::load_settings_for_mode(&app.handle(), WindowMode::Normal);
+            menu::set_translation_excluded_languages(
+                &app.handle(),
+                initial_settings.translation_excluded_languages,
+            );
+
             // Build tray menu early so bootstrap download state is visible immediately.
             let menu_items = menu::build_menu_items(&app.handle())?;
             let menu_refs: Vec<&dyn tauri::menu::IsMenuItem<_>> = menu_items
@@ -466,6 +472,7 @@ fn complete_startup(app: &tauri::AppHandle, cfg: RuntimeConfig) -> tauri::Result
 
     window::start_monitor_watcher(window.clone());
     window::start_layout_hover_controller(window.clone());
+    window::start_topmost_reinforcer(window.clone());
     start_click_through_hotkey_guard(app.clone());
 
     menu::update_color_menu_labels(app);

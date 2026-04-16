@@ -216,3 +216,4 @@ pub fn save_translation_excluded_languages(app: &tauri::AppHandle, languages: &[
     window_settings.translation_excluded_languages = languages.to_vec();
     save_settings_for_mode(app, &window_settings, WindowMode::Window);
 }
+

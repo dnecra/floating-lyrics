@@ -22,7 +22,6 @@ lazy_static::lazy_static! {
 
 const COMMON_TRANSLATION_LANGS: &[(&str, &str)] = &[
     ("id", "Indonesian"),
-    ("en", "English"),
     ("ja", "Japanese"),
     ("ko", "Korean"),
     ("zh", "Chinese"),
@@ -45,9 +44,7 @@ const MORE_TRANSLATION_LANGS: &[(&str, &str)] = &[
     ("da", "Danish"),
     ("de", "German"),
     ("el", "Greek"),
-    ("en", "English"),
     ("eo", "Esperanto"),
-    ("es", "Spanish"),
     ("et", "Estonian"),
     ("fa", "Persian"),
     ("fi", "Finnish"),
@@ -58,14 +55,11 @@ const MORE_TRANSLATION_LANGS: &[(&str, &str)] = &[
     ("hi", "Hindi"),
     ("hu", "Hungarian"),
     ("hy", "Armenian"),
-    ("id", "Indonesian"),
     ("is", "Icelandic"),
     ("it", "Italian"),
-    ("ja", "Japanese"),
     ("kk", "Kazakh"),
     ("km", "Khmer"),
     ("kn", "Kannada"),
-    ("ko", "Korean"),
     ("la", "Latin"),
     ("lt", "Lithuanian"),
     ("lv", "Latvian"),
@@ -75,16 +69,13 @@ const MORE_TRANSLATION_LANGS: &[(&str, &str)] = &[
     ("nl", "Dutch"),
     ("no", "Norwegian"),
     ("pl", "Polish"),
-    ("pt", "Portuguese"),
     ("rn", "Kirundi"),
     ("ro", "Romanian"),
-    ("ru", "Russian"),
     ("sk", "Slovak"),
     ("sr", "Serbian"),
     ("sv", "Swedish"),
     ("ta", "Tamil"),
     ("te", "Telugu"),
-    ("th", "Thai"),
     ("tk", "Turkmen"),
     ("tl", "Tagalog"),
     ("tlh", "Klingon"),
@@ -92,15 +83,9 @@ const MORE_TRANSLATION_LANGS: &[(&str, &str)] = &[
     ("tt", "Tatar"),
     ("uk", "Ukrainian"),
     ("ur", "Urdu"),
-    ("vi", "Vietnamese"),
     ("vo", "Volapuk"),
     ("yi", "Yiddish"),
-    ("zh", "Chinese"),
 ];
-
-fn translation_menu_item_label(_lang_id: &str, name: &str) -> String {
-    name.to_string()
-}
 
 fn translation_menu_item_id(lang_id: &str) -> String {
     format!("exclude_translation:{lang_id}")
@@ -109,14 +94,20 @@ fn translation_menu_item_id(lang_id: &str) -> String {
 fn build_translation_submenu(
     app: &tauri::AppHandle,
 ) -> Result<tauri::menu::Submenu<tauri::Wry>, Box<dyn std::error::Error>> {
-    let mut more_builder = SubmenuBuilder::with_id(app, "exclude_translation_more", "More");
+    let excluded = TRANSLATION_EXCLUDED_LANGUAGES
+        .lock()
+        .ok()
+        .map(|set| set.clone())
+        .unwrap_or_default();
+
+    let mut more_builder = SubmenuBuilder::with_id(app, "exclude_translation_more", "Other");
     for (lang_id, name) in MORE_TRANSLATION_LANGS {
         let item = CheckMenuItem::with_id(
             app,
             translation_menu_item_id(lang_id),
-            translation_menu_item_label(lang_id, name),
+            *name,
             true,
-            false,
+            excluded.contains(*lang_id),
             None::<&str>,
         )?;
         more_builder = more_builder.item(&item);
@@ -129,9 +120,9 @@ fn build_translation_submenu(
         let item = CheckMenuItem::with_id(
             app,
             translation_menu_item_id(lang_id),
-            translation_menu_item_label(lang_id, name),
+            *name,
             true,
-            false,
+            excluded.contains(*lang_id),
             None::<&str>,
         )?;
         builder = builder.item(&item);
@@ -274,11 +265,10 @@ pub fn update_translation_exclusion_menu_checks(app: &tauri::AppHandle) {
         .iter()
         .chain(MORE_TRANSLATION_LANGS.iter())
     {
-        let item_id = translation_menu_item_id(lang_id);
-        if let Some(item) = menu.get(&item_id) {
+        if let Some(item) = menu.get(&translation_menu_item_id(lang_id)) {
             if let Some(check_item) = item.as_check_menuitem() {
-                let _ = check_item.set_checked(!excluded.contains(*lang_id));
-                let _ = check_item.set_text(translation_menu_item_label(lang_id, name));
+                let _ = check_item.set_checked(excluded.contains(*lang_id));
+                let _ = check_item.set_text(*name);
             }
         }
     }
@@ -566,13 +556,7 @@ pub fn handle_menu_event(app: &tauri::AppHandle, event_id: &str) {
     }
 
     if let Some(lang_id) = event_id.strip_prefix("exclude_translation:") {
-        let item_id = translation_menu_item_id(lang_id);
-        if let Some(item) = active_menu(app).and_then(|menu| menu.get(&item_id)) {
-            if let Some(check_item) = item.as_check_menuitem() {
-                let allowed = check_item.is_checked().unwrap_or(true);
-                scripts::set_lyric_translation_allowed(app, lang_id, allowed);
-            }
-        }
+        scripts::toggle_lyric_translation_exclude(app, lang_id);
         return;
     }
 
