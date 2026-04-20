@@ -5,5 +5,5 @@ mod app_runtime;
 mod modules;
 
 fn main() {
-    app_runtime::run(app_runtime::Variant::Standalone);
+    app_runtime::run(app_runtime::Variant::Ytm);
 }

@@ -120,6 +120,22 @@ tauri.cmd build serverless x64
 tauri.cmd build all x64
 ```
 
+## GitHub Token File
+
+Standalone and YTM builds read the GitHub release token from `secrets/github-token.txt`
+first, then fall back to the `GITHUB_TOKEN` environment variable.
+
+Create the local token file like this:
+
+```text
+secrets/github-token.txt
+```
+
+Put only the token on the first non-empty line. Lines starting with `#` are ignored.
+
+That `secrets/` folder is git-ignored, but the standalone and YTM packaged builds include
+`secrets/github-token.txt` as a bundled Tauri resource so the installed app can still use it.
+
 Packaged installers are copied into [`nsis`](./nsis).
 
 ## Tray Controls

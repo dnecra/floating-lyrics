@@ -30,6 +30,9 @@
   "bundle": {
     "active": true,
     "targets": "nsis",
+    "resources": [
+      "secrets/github-token.txt"
+    ],
     "copyright": "Copyright (c) 2026 necra",
     "publisher": "necra",
     "windows": {

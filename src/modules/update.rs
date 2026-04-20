@@ -15,6 +15,7 @@ const UPDATE_CHECK_DELAY_SECS: u64 = 10;
 const SERVER_UPDATE_FILE: &str = "server-update.json";
 const RELEASE_CACHE_FILE: &str = "server-release-cache.json";
 const GITHUB_API_BASE: &str = "https://api.github.com";
+const GITHUB_TOKEN_RESOURCE_PATH: &str = "secrets/github-token.txt";
 const STANDALONE_RELEASE_OWNER: &str = match option_env!("FLOATING_LYRICS_STANDALONE_RELEASE_OWNER")
 {
     Some(value) => value,
@@ -605,16 +606,7 @@ fn normalize_release_tag(tag_name: &str) -> String {
 }
 
 fn github_client() -> Result<Client, String> {
-    let token = std::env::var("GITHUB_TOKEN")
-        .map_err(|_| "GITHUB_TOKEN is required for standalone server release downloads".to_string())
-        .and_then(|token| {
-            let trimmed = token.trim().to_string();
-            if trimmed.is_empty() {
-                Err("GITHUB_TOKEN is required for standalone server release downloads".to_string())
-            } else {
-                Ok(trimmed)
-            }
-        })?;
+    let token = resolve_github_token()?;
     let auth_value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
         .map_err(|error| {
             format!("GITHUB_TOKEN is invalid for GitHub Authorization header: {error}")
@@ -630,6 +622,70 @@ fn github_client() -> Result<Client, String> {
         .default_headers(headers)
         .build()
         .map_err(|error| error.to_string())
+}
+
+fn resolve_github_token() -> Result<String, String> {
+    read_github_token_from_file()
+        .or_else(read_github_token_from_env)
+        .ok_or_else(|| {
+            format!(
+                "GitHub token is required for standalone server release downloads. \
+Expected a non-empty token in {} or GITHUB_TOKEN.",
+                GITHUB_TOKEN_RESOURCE_PATH
+            )
+        })
+}
+
+fn read_github_token_from_file() -> Option<String> {
+    github_token_candidate_paths()
+        .into_iter()
+        .find_map(|path| fs::read_to_string(path).ok())
+        .and_then(|contents| sanitize_github_token(&contents))
+}
+
+fn read_github_token_from_env() -> Option<String> {
+    std::env::var("GITHUB_TOKEN")
+        .ok()
+        .and_then(|token| sanitize_github_token(&token))
+}
+
+fn sanitize_github_token(contents: &str) -> Option<String> {
+    let first_line = contents
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))?;
+    if first_line.is_empty() {
+        None
+    } else {
+        Some(first_line.to_string())
+    }
+}
+
+fn github_token_candidate_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            paths.push(exe_dir.join(GITHUB_TOKEN_RESOURCE_PATH));
+            paths.push(exe_dir.join("resources").join(GITHUB_TOKEN_RESOURCE_PATH));
+        }
+    }
+
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        paths.push(PathBuf::from(manifest_dir).join(GITHUB_TOKEN_RESOURCE_PATH));
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        paths.push(current_dir.join(GITHUB_TOKEN_RESOURCE_PATH));
+    }
+
+    let mut unique_paths = Vec::new();
+    for path in paths {
+        if !unique_paths.iter().any(|existing| existing == &path) {
+            unique_paths.push(path);
+        }
+    }
+    unique_paths
 }
 
 fn read_persisted_version(app: &AppHandle) -> Option<String> {
